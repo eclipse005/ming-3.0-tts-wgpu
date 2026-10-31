@@ -172,7 +172,13 @@ pub fn run(a: Args) -> Result<()> {
     }
 
     let need_prompt = !a.prompt_wav_path.is_empty() && prompt_text.is_some();
-    let needs_encoder = need_prompt;
+    // Voice-design (STYLE) tasks that get split re-use the first generated chunk
+    // as the acoustic prompt for the remaining fragments (ming_tts.synthesize's
+    // reference_first_fragment branch). That needs the VAE encoder even when no
+    // --prompt_wav_path was given.
+    let fragments = prepare_text(&tok, &req, &a)?;
+    let reference_first_fragment = req.taskname == "STYLE" && fragments.len() > 1;
+    let needs_encoder = need_prompt || reference_first_fragment;
     let mut pl = Pipeline::load(model_dir, needs_encoder)?;
 
     if !a.prompt_wav_path.is_empty() {
@@ -203,35 +209,13 @@ pub fn run(a: Args) -> Result<()> {
         }
 
         if need_prompt {
-            // pad at the FRONT to a multiple of hop * patch * dtar patch
-            let align = 882 * 4 * 1;
-            let rem = all.len() % align;
-            if rem != 0 {
-                let mut padded = vec![0f32; all.len() + align - rem];
-                padded[align - rem..].copy_from_slice(&all);
-                all = padded;
-            }
-            let enc = pl.enc.as_ref().expect("encoder loaded");
-            let (mean, std, n_patch) = enc.encode_params(&all)?;
-            // posterior.sample(): torch draws one tensor of shape [1, 64, T], so
-            // the flat stream is (channel, frame) ordered while our mean/std are
-            // (frame, channel); transpose to line the samples up.
-            let frames = mean.len() / 64;
-            let raw = rng.draw(64 * frames);
-            let mut latent = vec![0f32; mean.len()];
-            for t in 0..frames {
-                for c in 0..64 {
-                    let i = t * 64 + c;
-                    latent[i] = mean[i] + std[i] * raw[c * frames + t];
-                }
-            }
-            prompt_latent = Some((latent, n_patch));
+            prompt_latent = Some(encode_prompt_latent(&pl, &mut *rng, &all)?);
         }
     }
 
     // spk_head: 192 -> 896. Applied before the zeroing, exactly as in
     // BailingMM.prepare_input_embed.
-    let spk_row: Option<Vec<f32>> = match &spk_emb {
+    let mut spk_row: Option<Vec<f32>> = match &spk_emb {
         None => None,
         Some(se) => {
             if zero_spk {
@@ -247,19 +231,12 @@ pub fn run(a: Args) -> Result<()> {
     }
 
     // ---- project prompt latents into LLM space -----------------------------
-    let mut latent_rows: Option<Vec<f32>> = None;
-    let mut latent_steps = 0usize;
-    if let Some((pl_lat, n)) = &prompt_latent {
-        let mut rows = Vec::with_capacity(n * 896);
-        for i in 0..*n {
-            let row = pl.project_latent(&pl_lat[i * 64..(i + 1) * 64])?;
-            rows.extend_from_slice(&row);
-        }
-        latent_rows = Some(rows);
-        latent_steps = *n;
-    }
+    let mut latent_rows: Option<Vec<f32>> = match &prompt_latent {
+        Some((lat, n)) => Some(project_latent_rows(&pl, lat, *n)?),
+        None => None,
+    };
+    let mut latent_steps = prompt_latent.as_ref().map_or(0, |(_, n)| *n);
 
-    let fragments = prepare_text(&tok, &req, &a)?;
     println!("fragments: {}", fragments.len());
 
     let params = SynthParams {
@@ -292,6 +269,7 @@ pub fn run(a: Args) -> Result<()> {
                 .map(|v| v.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
+            let path = format!("{path}.{index}");
             std::fs::write(&path, ids)?;
             println!("ids -> {path} ({} tokens)", layout.input_ids.len());
         }
@@ -326,6 +304,28 @@ pub fn run(a: Args) -> Result<()> {
         if !a.no_trim_silence {
             wav = Pipeline::trim_trailing_silence(&wav, 44100);
         }
+
+        if reference_first_fragment && index == 0 {
+            // ming_tts._prepare_generated_prompt: take the chunk we just
+            // generated (trimmed, like the reference) and use it as the acoustic
+            // prompt for every later fragment -- including its speaker embedding.
+            let spk16 = audio::resample(&wav, 44100, 16000);
+            let onnx = model_dir.join("campplus.onnx");
+            let se = spk::embed_16k_with(&onnx, &spk16)
+                .context("campplus speaker embedding of the generated prompt")?;
+            spk_row = Some(pl.project_speaker(&se)?);
+            let (lat, n) = encode_prompt_latent(&pl, &mut *rng, &wav)?;
+            latent_rows = Some(project_latent_rows(&pl, &lat, n)?);
+            latent_steps = n;
+            prompt_latent = Some((lat, n));
+            prompt_text = Some(fragment.clone());
+            println!(
+                "  re-conditioning on fragment 0: {} prompt patches, {} speaker dim",
+                n,
+                spk16.len()
+            );
+        }
+
         out.extend_from_slice(&wav);
     }
 
@@ -337,4 +337,44 @@ pub fn run(a: Args) -> Result<()> {
         out.len() as f64 / 44100.0
     );
     Ok(())
+}
+
+/// Encode a 44.1 kHz waveform into a prompt latent, exactly like
+/// encode_prompt_latent: front-pad to a whole patch, run the VAE encoder, then
+/// draw the posterior sample with the reference's RNG (torch draws [1,64,T] while
+/// our mean/std are [T,64], so the flat draw is transposed).
+fn encode_prompt_latent(
+    pl: &Pipeline,
+    rng: &mut dyn crate::pipeline::Noise,
+    wav44k: &[f32],
+) -> Result<(Vec<f32>, usize)> {
+    let align = 882 * 4; // hop * encoder patch size * ditar patch size (1)
+    let mut all = wav44k.to_vec();
+    let rem = all.len() % align;
+    if rem != 0 {
+        let mut padded = vec![0f32; all.len() + align - rem];
+        padded[align - rem..].copy_from_slice(&all);
+        all = padded;
+    }
+    let enc = pl.enc.as_ref().context("pipeline loaded without the VAE encoder")?;
+    let (mean, std, n_patch) = enc.encode_params(&all)?;
+    let frames = mean.len() / 64;
+    let raw = rng.draw(64 * frames);
+    let mut latent = vec![0f32; mean.len()];
+    for t in 0..frames {
+        for c in 0..64 {
+            let i = t * 64 + c;
+            latent[i] = mean[i] + std[i] * raw[c * frames + t];
+        }
+    }
+    Ok((latent, n_patch))
+}
+
+/// linear_proj_audio, patch by patch.
+fn project_latent_rows(pl: &Pipeline, latent: &[f32], n: usize) -> Result<Vec<f32>> {
+    let mut rows = Vec::with_capacity(n * 896);
+    for i in 0..n {
+        rows.extend_from_slice(&pl.project_latent(&latent[i * 64..(i + 1) * 64])?);
+    }
+    Ok(rows)
 }
