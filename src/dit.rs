@@ -146,7 +146,7 @@ impl DitEngine {
             k_add: kernel(&gpu, shaders::ADD, 2),
             k_kvwrite: kernel(&gpu, shaders::KV_WRITE, 1),
             k_pack3: kernel(&gpu, shaders::PACK3, 3),
-            k_gelu: kernel(&gpu, shaders::GELU_ERF, 1),
+            k_gelu: kernel(&gpu, shaders::GELU_TANH, 1),
             gpu,
         })
     }
@@ -395,6 +395,21 @@ impl DitEngine {
         noise: &[f32],
         sde: &[f32],
         cfg: f32,
+        trace: Option<(&mut Vec<Vec<f32>>, &mut Vec<Vec<f32>>, &mut Vec<Vec<f32>>)>,
+    ) -> Result<Vec<f32>> {
+        self.flow_sample_full(z, lh, noise, sde, cfg, 0.25, 0.0, trace)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn flow_sample_full(
+        &self,
+        z: &[f32],
+        lh: &[f32],
+        noise: &[f32],
+        sde: &[f32],
+        cfg: f32,
+        sigma: f32,
+        temperature: f32,
         mut trace: Option<(&mut Vec<Vec<f32>>, &mut Vec<Vec<f32>>, &mut Vec<Vec<f32>>)>,
     ) -> Result<Vec<f32>> {
         // epss timesteps for n=10, sway coef -1.0 (f32 math like torch)
@@ -422,7 +437,14 @@ impl DitEngine {
                 vel[i] = pred[i] + (pred[i] - null[i]) * cfg;
             }
             for i in 0..ZC {
-                y[i] += vel[i] * dt; // sde term is zero at temperature 0
+                y[i] += vel[i] * dt;
+            }
+            if temperature > 0.0 {
+                let k = sigma * temperature.sqrt() * dt.abs().sqrt();
+                let base = step * ZC;
+                for i in 0..ZC {
+                    y[i] += k * sde[base + i];
+                }
             }
         }
         Ok(y)
@@ -459,5 +481,23 @@ impl DitEngine {
         cfg: f32,
     ) -> Result<Vec<f32>> {
         self.flow_sample_traced(z, lh, noise, sde, cfg, None)
+    }
+
+    /// CFM.sample including the stochastic term:
+    ///   y += sigma * sqrt(temperature) * sqrt(|dt|) * sde_noise[step]
+    /// The term is identically zero at temperature 0, which is why the M2
+    /// goldens were reproducible with no RNG at all.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flow_sample_stoch(
+        &self,
+        z: &[f32],
+        lh: &[f32],
+        noise: &[f32],
+        sde: &[f32],
+        cfg: f32,
+        sigma: f32,
+        temperature: f32,
+    ) -> Result<Vec<f32>> {
+        self.flow_sample_full(z, lh, noise, sde, cfg, sigma, temperature, None)
     }
 }

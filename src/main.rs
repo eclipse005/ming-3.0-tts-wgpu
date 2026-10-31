@@ -7,13 +7,20 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod audio;
 mod dit;
 mod gpu;
 mod istft;
 mod nn;
 mod parity;
+mod pipeline;
+mod prompt;
 mod qwen_lm;
 mod shaders;
+mod spk;
+mod tasks;
+mod text;
+mod tok;
 mod vae;
 mod vae_dec;
 mod weights;

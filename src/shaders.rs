@@ -384,19 +384,17 @@ fn main(
 }
 "#;
 
-/// GELU with the exact erf form (A&S 7.1.26, |err| < 1.5e-7): 0.5x(1+erf(x/sqrt2)).
-pub const GELU_ERF: &str = r#"
+/// GELU, tanh approximation -- the form the DiT/Aggregator actually use:
+/// fm/modules.py builds FeedForward with nn.GELU(approximate="tanh"), i.e.
+///   0.5 * x * (1 + tanh(beta * x * (1 + kappa * x^2)))
+/// with beta = sqrt(2/pi) and kappa = 0.044715, exactly as PyTorch's kernel.
+/// The erf form differs from this by up to ~1e-3, which is what capped M2
+/// parity at 1.2e-4 and then amplified along the autoregressive decode chain.
+pub const GELU_TANH: &str = r#"
 struct Params { n: u32, }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> y: array<f32>;
-fn erf_approx(v: f32) -> f32 {
-    let ax = abs(v);
-    let t = 1.0 / (1.0 + 0.3275911 * ax);
-    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-    let e = 1.0 - poly * exp(-ax * ax);
-    return select(-e, e, v >= 0.0);
-}
 @compute @workgroup_size(256)
 fn main(
     @builtin(workgroup_id) wg: vec3<u32>,
@@ -405,7 +403,9 @@ fn main(
     let i = wg.x * 256u + lid.x;
     if (i < p.n) {
         let v = x[i];
-        y[i] = 0.5 * v * (1.0 + erf_approx(v * 0.70710678));
+        let beta = 0.7978845608028654;
+        let kappa = 0.044715;
+        y[i] = 0.5 * v * (1.0 + tanh(v * beta * (1.0 + v * v * kappa)));
     }
 }
 "#;

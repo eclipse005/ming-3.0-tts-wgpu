@@ -279,13 +279,17 @@ impl LlmEngine {
 
     /// Prefill `t` tokens; returns the post-final-norm last hidden.
     pub fn prefill(&mut self, embeds: &[f32], t: usize) -> Result<[f32; 2]> {
+        Ok(self.prefill_full(embeds, t)?.1)
+    }
+
+    /// Prefill `t` tokens; returns (last hidden after the final norm, stop probs).
+    pub fn prefill_full(&mut self, embeds: &[f32], t: usize) -> Result<(Vec<f32>, [f32; 2])> {
         if embeds.len() != t * HIDDEN {
             bail!("prefill embeds {} != t*{}", embeds.len(), HIDDEN);
         }
         let x = self.gpu.upload_f32(embeds, "prefill.x");
         let h = self.transformer(x, t, 0)?;
-        let (_, prob) = self.last_hidden(&h, t)?;
-        Ok(prob)
+        self.last_hidden(&h, t)
     }
 
     /// One decode step at absolute position `pos`; returns (z, stop probs).

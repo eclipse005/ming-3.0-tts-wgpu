@@ -1,0 +1,234 @@
+{
+ "f32": {
+  "lingguang_mono.f32": {
+   "shape": [
+    158072
+   ],
+   "count": 158072,
+   "sample_rate": 48000,
+   "source": "torchaudio.load(soundfile) then mean(dim=0)"
+  },
+  "db30_mono.f32": {
+   "shape": [
+    16774
+   ],
+   "count": 16774,
+   "sample_rate": 16000,
+   "source": "torchaudio.load(soundfile) then mean(dim=0)"
+  },
+  "stereo_mean.f32": {
+   "shape": [
+    158072
+   ],
+   "count": 158072,
+   "sample_rate": 48000,
+   "source": "mean(dim=0) of the 2-channel wav"
+  },
+  "lingguang_48000_to_16000.f32": {
+   "shape": [
+    52691
+   ],
+   "count": 52691,
+   "orig": 48000,
+   "new": 16000
+  },
+  "lingguang_48000_to_44100.f32": {
+   "shape": [
+    145229
+   ],
+   "count": 145229,
+   "orig": 48000,
+   "new": 44100
+  },
+  "db30_16000_to_44100.f32": {
+   "shape": [
+    46234
+   ],
+   "count": 46234,
+   "orig": 16000,
+   "new": 44100
+  },
+  "chirp_44100.f32": {
+   "shape": [
+    22050
+   ],
+   "count": 22050,
+   "sample_rate": 44100,
+   "source": "chirp 120->7000 Hz plus 1.5/9/19 kHz tones, 0.5 s"
+  },
+  "chirp_44100_to_16000.f32": {
+   "shape": [
+    8000
+   ],
+   "count": 8000,
+   "orig": 44100,
+   "new": 16000
+  },
+  "sine_22050.f32": {
+   "shape": [
+    5512
+   ],
+   "count": 5512,
+   "sample_rate": 22050,
+   "source": "440 Hz, 0.25 s"
+  },
+  "sine_22050_to_44100.f32": {
+   "shape": [
+    11024
+   ],
+   "count": 11024,
+   "orig": 22050,
+   "new": 44100
+  },
+  "sine_22050_to_22050.f32": {
+   "shape": [
+    5512
+   ],
+   "count": 5512,
+   "orig": 22050,
+   "new": 22050
+  },
+  "wav_ref_1ch_44100_in.f32": {
+   "shape": [
+    1000
+   ],
+   "count": 1000,
+   "sample_rate": 44100,
+   "layout": "(samples,)"
+  },
+  "wav_ref_2ch_16000_in.f32": {
+   "shape": [
+    2,
+    500
+   ],
+   "count": 1000,
+   "sample_rate": 16000,
+   "layout": "(channels, samples)"
+  },
+  "wav_ref_zeros_44100_in.f32": {
+   "shape": [
+    64
+   ],
+   "count": 64,
+   "sample_rate": 44100,
+   "layout": "(samples,)"
+  },
+  "wav_ref_clip_44100_in.f32": {
+   "shape": [
+    6
+   ],
+   "count": 6,
+   "sample_rate": 44100,
+   "layout": "(samples,)"
+  },
+  "wav_ref_tie_44100_in.f32": {
+   "shape": [
+    5
+   ],
+   "count": 5,
+   "sample_rate": 44100,
+   "layout": "(samples,)"
+  },
+  "wav_ref_one_44100_in.f32": {
+   "shape": [
+    1
+   ],
+   "count": 1,
+   "sample_rate": 44100,
+   "layout": "(samples,)"
+  },
+  "wav_ref_odd_16000_in.f32": {
+   "shape": [
+    3
+   ],
+   "count": 3,
+   "sample_rate": 16000,
+   "layout": "(samples,)"
+  },
+  "lingguang_mono_48000_for_wav.f32": {
+   "shape": [
+    158072
+   ],
+   "count": 158072,
+   "sample_rate": 48000
+  },
+  "spk_lingguang_fbank.f32": {
+   "shape": [
+    327,
+    80
+   ],
+   "count": 26160,
+   "source": "kaldi.fbank(80 bins, dither=0, sr=16000) minus the per-bin mean",
+   "frames": 327,
+   "bins": 80
+  }
+ },
+ "json": [
+  "ids.json",
+  "spk_lingguang.json"
+ ],
+ "wav": [
+  {
+   "name": "stereo_input.wav",
+   "writer": "torchaudio.save",
+   "channels": 2,
+   "sample_rate": 48000
+  },
+  {
+   "name": "wav_ref_1ch_44100.wav",
+   "writer": "torchaudio.save",
+   "channels": 1,
+   "sample_rate": 44100,
+   "samples": 1000
+  },
+  {
+   "name": "wav_ref_2ch_16000.wav",
+   "writer": "torchaudio.save",
+   "channels": 2,
+   "sample_rate": 16000,
+   "samples": 500
+  },
+  {
+   "name": "wav_ref_zeros_44100.wav",
+   "writer": "torchaudio.save",
+   "channels": 1,
+   "sample_rate": 44100,
+   "samples": 64
+  },
+  {
+   "name": "wav_ref_clip_44100.wav",
+   "writer": "torchaudio.save",
+   "channels": 1,
+   "sample_rate": 44100,
+   "samples": 6
+  },
+  {
+   "name": "wav_ref_tie_44100.wav",
+   "writer": "torchaudio.save",
+   "channels": 1,
+   "sample_rate": 44100,
+   "samples": 5
+  },
+  {
+   "name": "wav_ref_one_44100.wav",
+   "writer": "torchaudio.save",
+   "channels": 1,
+   "sample_rate": 44100,
+   "samples": 1
+  },
+  {
+   "name": "wav_ref_odd_16000.wav",
+   "writer": "torchaudio.save",
+   "channels": 1,
+   "sample_rate": 16000,
+   "samples": 3
+  },
+  {
+   "name": "wav_ref_lingguang_48000.wav",
+   "writer": "torchaudio.save",
+   "channels": 1,
+   "sample_rate": 48000,
+   "samples": 158072
+  }
+ ]
+}

@@ -796,3 +796,106 @@ mod m4_tests {
         assert!(e < 1e-3, "waveform {e:.3e}");
     }
 }
+
+
+#[cfg(test)]
+mod m5_tests {
+    use super::*;
+    use crate::pipeline::{GoldenNoise, Pipeline, SynthParams};
+
+    fn m5dir() -> std::path::PathBuf {
+        let dir = std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
+        std::path::Path::new(&dir).join("m5")
+    }
+
+    #[test]
+    fn decode_loop_matches_python() {
+        let d = m5dir();
+        let load = |n: &str| read_npy(&d.join(n)).unwrap();
+        let expects: usize = 43;
+        let embeds = load("inputs_embeds.npy");
+        let z_steps = load("z_steps.npy");
+        let lat_steps = load("latent_steps.npy");
+        let dec_lat = load("decode_latent.npy");
+        let want_wav = load("waveform.npy");
+        let meta = std::fs::read_to_string(d.join("meta.json")).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+        let n_steps = meta["n_steps"].as_u64().unwrap() as usize;
+        let n_noise = meta["n_noise"].as_u64().unwrap() as usize;
+        println!("tokens={} steps={} noise={}", expects, n_steps, n_noise);
+
+        let mut draws = Vec::with_capacity(n_noise);
+        for i in 0..n_noise {
+            draws.push(load(&format!("noise_{i:03}.npy")).data);
+        }
+
+        let mut pl = Pipeline::load(&model_dir(), false).unwrap();
+        let mut noise = GoldenNoise::new(draws);
+        let params = SynthParams::default();
+        let t0 = std::time::Instant::now();
+        let tr = pl
+            .decode_loop(&embeds.data, expects, None, 0, &mut noise, &params)
+            .unwrap();
+        println!("loop {:?} -> {} latents, stopped_at={:?}",
+                 t0.elapsed(), tr.n_latents, tr.stopped_at);
+
+        // per-step hidden state
+        let mut worst = 0f32;
+        let mut worst_step = 0;
+        let n = tr.z_steps.len().min(n_steps);
+        for s in 0..n {
+            let want = &z_steps.data[s * 896..(s + 1) * 896];
+            let e = rel_l2(&tr.z_steps[s], want);
+            if e > worst {
+                worst = e;
+                worst_step = s;
+            }
+            if s < 3 || s == n - 1 {
+                println!("  z step {s}: rel_l2={e:.3e}");
+            }
+        }
+        println!("worst z rel_l2={worst:.3e} @ step {worst_step}");
+
+        // per-step latents
+        let mut worst_l = 0f32;
+        let mut worst_ls = 0;
+        for s in 0..n {
+            let want = &lat_steps.data[s * 64..(s + 1) * 64];
+            let got = &tr.latents[s * 64..(s + 1) * 64];
+            let e = rel_l2(got, want);
+            if e > worst_l {
+                worst_l = e;
+                worst_ls = s;
+            }
+        }
+        println!("worst latent rel_l2={worst_l:.3e} @ step {worst_ls}");
+
+        // stop probabilities
+        let mut worst_p = 0f32;
+        for s in 0..n.min(tr.stop_probs.len()) {
+            let _ = s;
+        }
+        for &v in tr.stop_probs.iter() {
+            worst_p = worst_p.max(v);
+        }
+        println!("final stop prob={worst_p:.4} (python 0.729774 for the M1 case)");
+
+        // full vocoder chain
+        let got_wav = pl.vocode(&tr.latents, tr.n_latents).unwrap();
+        assert_eq!(got_wav.len(), want_wav.data.len(), "waveform length");
+        let ew = rel_l2(&got_wav, &want_wav.data);
+        println!("waveform rel_l2={ew:.3e} len={}", got_wav.len());
+
+        // The autoregressive + diffusion loop cannot be bit-exact across two
+        // different f32 reduction orders: one DiT forward already sits at
+        // ~2.6e-5 (cuBLAS blocked reductions vs our sequential GEMV -- the f32
+        // floor), and feeding every latent back amplifies it. What must hold
+        // exactly is the structural behaviour: the loop has to take the same
+        // number of steps, i.e. make the same stopping decision.
+        assert_eq!(tr.n_latents, n_steps, "step count / stop decision");
+        assert!(worst < 2e-2, "z steps {worst:.3e}");
+        assert!(worst_l < 2e-2, "latents {worst_l:.3e}");
+        assert!(ew < 2e-2, "waveform {ew:.3e}");
+    }
+}
