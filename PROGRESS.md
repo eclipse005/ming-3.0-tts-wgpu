@@ -53,6 +53,27 @@ wgpu\target\release\ming-tts-wgpu.exe synth ^
 
 也就是说：同一个 seed 下，Rust 端产出的是**同一句话、同一时长、频谱几乎重合**的音频。
 
+### 音色（克隆）链路验收 — CAMPlus 相似度
+
+用 CAMPlus 对这四段音频算 192 维 embedding 后两两余弦：
+
+| A | B | cos |
+|---|---|---|
+| ref A1（无提示音） | **rust A1** | **+1.0000** |
+| ref A3（Python 克隆） | **rust A3** | **+0.9446** |
+| 提示音 lingguang | ref A3 | +0.8019 |
+| 提示音 lingguang | **rust A3** | **+0.7629** |
+| 提示音 lingguang | ref A1（无提示） | +0.1534 |
+| 提示音 lingguang | rust A1（无提示） | +0.1539 |
+
+即：无提示音的 A1 与 Python 版**音色完全一致（1.0000）**；克隆路径 A3 与 Python 的
+克隆结果 0.9446、与提示音 0.76（Python 自己是 0.80）——**克隆确实"像"提示音**，
+use_spk_emb（CAMPlus → spk_head 896 维 → 插入 speaker pad 行）整条链路正确。
+
+A2（use_zero_spk_emb）/ A3 均已跑通，产出 output/rust/A2_zero_spk.wav（3.92 s）、
+output/rust/A3_clone.wav（3.28 s）。时长与 Python 不同是**预期**的：两边 RNG 不同，
+停止步落在别处。
+
 ### 前端移植（子代理完成，全部对拍）
 
 - `text.rs`（toolkit + text_segment_cut）：695 条语料 / 10425 个字段相等 / 4526 个

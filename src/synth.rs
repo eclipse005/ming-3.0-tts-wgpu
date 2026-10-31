@@ -159,7 +159,10 @@ pub fn run(a: Args) -> Result<()> {
     let mut prompt_latent: Option<(Vec<f32>, usize)> = None;
     let mut prompt_text = req.prompt_text.clone();
 
+    let mut zero_spk = a.use_zero_spk_emb;
     if a.use_zero_spk_emb {
+        // The reference still allocates one speaker slot; it is just zeroed
+        // after the projection.
         spk_emb = Some(vec![0.0; 192]);
     }
 
@@ -208,13 +211,34 @@ pub fn run(a: Args) -> Result<()> {
             }
             let enc = pl.enc.as_ref().expect("encoder loaded");
             let (mean, std, n_patch) = enc.encode_params(&all)?;
-            let mut latent = vec![0f32; mean.len()];
-            for i in 0..mean.len() {
-                latent[i] = mean[i] + std[i] * rng.noise()[0];
+            // posterior.sample(): one normal draw per (latent, frame), drawn
+            // before any decode step, exactly like the reference's RNG order.
+            let need = mean.len();
+            let mut eps: Vec<f32> = Vec::with_capacity(need + 64);
+            while eps.len() < need {
+                eps.extend_from_slice(&rng.noise());
+            }
+            let mut latent = vec![0f32; need];
+            for i in 0..need {
+                latent[i] = mean[i] + std[i] * eps[i];
             }
             prompt_latent = Some((latent, n_patch));
         }
     }
+
+    // spk_head: 192 -> 896. Applied before the zeroing, exactly as in
+    // BailingMM.prepare_input_embed.
+    let spk_row: Option<Vec<f32>> = match &spk_emb {
+        None => None,
+        Some(se) => {
+            if zero_spk {
+                zero_spk = false;
+                Some(vec![0.0; 896])
+            } else {
+                Some(pl.project_speaker(se)?)
+            }
+        }
+    };
 
     if prompt_latent.is_none() {
         prompt_text = None;
@@ -251,16 +275,16 @@ pub fn run(a: Args) -> Result<()> {
             &tok::InputSeqArgs {
                 prompt: &req.prompt,
                 text: fragment,
-                num_speakers: spk_emb.is_some() as usize,
+                num_speakers: spk_row.is_some() as usize,
                 instruction: req.instruction.as_deref(),
                 prompt_text: if latent_rows.is_some() { prompt_text.as_deref() } else { None },
                 prompt_latent_steps: latent_steps,
             },
         )?;
         let mut embeds = pl.embed_ids(&layout.input_ids)?;
-        if let Some(se) = &spk_emb {
+        if let Some(se) = &spk_row {
             let pos = layout.speaker_positions[0];
-            embeds[pos * 896..(pos + 1) * 896].copy_from_slice(&se[..896.min(se.len())]);
+            embeds[pos * 896..(pos + 1) * 896].copy_from_slice(&se[..]);
         }
         if let Some(rows) = &latent_rows {
             let start = layout.latent_position as usize;

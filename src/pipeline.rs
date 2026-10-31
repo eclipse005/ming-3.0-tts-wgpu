@@ -12,6 +12,7 @@ use crate::qwen_lm::{LlmEngine, HIDDEN};
 use crate::vae::VaeEncoder;
 use crate::vae_dec::VaeDecoder;
 use crate::weights::{bf16_widen, Weights};
+use wgpu::Buffer;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
@@ -135,6 +136,9 @@ pub struct Pipeline {
     pub dit: DitEngine,
     pub dec: VaeDecoder,
     pub enc: Option<VaeEncoder>,
+    /// 192-dim CAMPlus space -> 896-dim LLM space (spk_head).
+    spk_w: Buffer,
+    spk_b: Buffer,
 }
 
 /// Trace of one decode loop, kept for parity assertions.
@@ -158,7 +162,12 @@ impl Pipeline {
         } else {
             None
         };
-        Ok(Self { gpu, w, llm, dit, dec, enc })
+        let spk_w = gpu.upload_u32(
+            &w.get("spk_head.weight")?.to_bf16_packed_u32()?,
+            "spk.w",
+        );
+        let spk_b = gpu.upload_f32(&w.get("spk_head.bias")?.to_f32()?, "spk.b");
+        Ok(Self { gpu, w, llm, dit, dec, enc, spk_w, spk_b })
     }
 
     /// Token ids -> [T, 896] input embeddings (no speaker / latent rows).
@@ -187,6 +196,13 @@ impl Pipeline {
     /// Project one latent patch [64] to a 896-wide LLM embedding (linear_proj_audio).
     pub fn project_latent(&self, latent: &[f32]) -> Result<Vec<f32>> {
         self.dit.agg_forward(latent)
+    }
+
+    /// Project a 192-dim CAMPlus embedding into the 896-dim LLM space
+    /// (BailingMM.spk_head). A zero speaker embedding is applied AFTER the
+    /// projection in the reference, so it is just a zero row here.
+    pub fn project_speaker(&self, spk192: &[f32]) -> Result<Vec<f32>> {
+        crate::nn::gemv_bf16w_buf(&self.gpu, &self.spk_w, &self.spk_b, spk192, 896, 192)
     }
 
     /// The autoregressive decode loop. `embeds` is [t, 896].
