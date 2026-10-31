@@ -19,7 +19,7 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
 | 阶段 | 内容 | parity 断言 | 状态 |
 |---|---|---|---|
 | M0 | 骨架：gpu 初始化 + bf16 权重加载 + rmsnorm/gemv 内核 + 单层 parity | rel_l2 < 1e-5 | ✅ 2026-10-31（rmsnorm 1.0e-7 / gemv 3.0e-7，Vulkan 上 P104-100 实测） |
-| M1 | LLM：prefill + KV 解码 + stop head | 停止步数强断言（60+ 文本/seed） | ⬜ 下一步 |
+| M1 | LLM：prefill + KV 解码 + stop head | 停止步数强断言（60+ 文本/seed） | ✅ 2026-10-31（真实序列 40 步重放：z rel_l2 8.1e-7、prob 差 3.9e-6、stop_step=40 与 Python 一致；多文本/seed 批量断言留 M5 验收一并跑） |
 | M2 | DiT + Aggregator（固定 seed 噪声注入） | latent rel_l2 < 1e-3 | ⬜ |
 | M3 | VAE Encoder（prompt → latent） | 与 Python 导出 latent 对拍 | ⬜ |
 | M4 | VAE Decoder + iSTFT 全链路 | 频谱 L2 + 时长 + 试听 | ⬜ |
@@ -49,3 +49,16 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
   WGSL 内核族（改 f32）、tokenizers 集成。
 - `D:\index-tts\indextts-rs`：golden npy + rel_l2 parity 方法论、CPU oracle twin、
   f32 CFM 精度教训、预分配工作区模式。
+
+## M1 记录（2026-10-31）
+
+- 新内核：GEMV_MROW（prefill 多 token 线性层）、ROPE（rotate-half，宿主 f64 表 θ=1e6）、
+  ATTEND（每 (head,token) 一个 workgroup 的因果 GQA，直读 f32 KV cache）、SILU_MUL、
+  ADD、KV_WRITE。
+- 引擎：24 层、bf16 权重常驻显存、f32 KV cache（每层 2×512×64）。
+- 踩坑：Pascal wgpu 默认 workgroup 上限 256（ROPE 512→循环式）；每个内核的
+  storage-ro 数量必须逐一对准（ATTEND=3/ROPE=2/GEMV_MROW=3）；ATTEND Params 16B。
+- Python 侧 dump 注意：decode 步输入走 `_project_audio_latent`（CUDA Graph replay
+  绕过模块 forward），spy 必须挂在这里而不是 linear_proj_audio.forward。
+- 下一步 M2：DiT/Aggregator（1024 宽小 transformer，同内核族参数化）+ flowloss
+  Euler 采样 + 固定 seed 噪声注入对拍。
