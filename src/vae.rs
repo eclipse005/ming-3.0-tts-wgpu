@@ -100,13 +100,13 @@ impl VaeEncoder {
         let agg = (0..AGG_LAYERS)
             .map(|i| qlayer(&format!("audio.encoder.aggregator.layers.{i}")))
             .collect::<Result<Vec<_>>>()?;
+        // The audio Qwen2 stack uses torchtune-style rotary (audio_tokenizer/
+        // rope.py): INTERLEAVED pairs (2i, 2i+1) with base 10000 — unlike the
+        // LLM's Qwen2 rotate-half with theta 1e6.
         let (mut cos, mut sin) = (vec![0f32; KV_CAP * 32], vec![0f32; KV_CAP * 32]);
         for pos in 0..KV_CAP {
             for i in 0..32 {
-                let theta = std::env::var("MING_VAE_THETA").ok()
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .unwrap_or(ROPE_THETA);
-                let freq = theta.powf((2 * i) as f64 / 64.0).recip();
+                let freq = 10_000f64.powf((2 * i) as f64 / 64.0).recip();
                 cos[pos * 32 + i] = (pos as f64 * freq).cos() as f32;
                 sin[pos * 32 + i] = (pos as f64 * freq).sin() as f32;
             }
@@ -167,7 +167,10 @@ impl VaeEncoder {
             let q = self.mrow(&layer.q, &a, t)?;
             let k = self.mrow(&layer.k, &a, t)?;
             let v = self.mrow(&layer.v, &a, t)?;
-            let ru = uni2(Q_HEADS as u32, 0);
+            let mut ru = [0u8; 16];
+            ru[0..4].copy_from_slice(&(Q_HEADS as u32).to_le_bytes());
+            ru[4..8].copy_from_slice(&0u32.to_le_bytes());
+            ru[8..12].copy_from_slice(&1u32.to_le_bytes()); // interleaved (torchtune)
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &q, t as u32, 1);
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
             let kc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.kc");
@@ -220,7 +223,10 @@ impl VaeEncoder {
             let q = self.mrow(&layer.q, &a, t)?;
             let k = self.mrow(&layer.k, &a, t)?;
             let v = self.mrow(&layer.v, &a, t)?;
-            let ru = uni2(Q_HEADS as u32, 0);
+            let mut ru = [0u8; 16];
+            ru[0..4].copy_from_slice(&(Q_HEADS as u32).to_le_bytes());
+            ru[4..8].copy_from_slice(&0u32.to_le_bytes());
+            ru[8..12].copy_from_slice(&1u32.to_le_bytes()); // interleaved (torchtune)
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &q, t as u32, 1);
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
             let kc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.kc");

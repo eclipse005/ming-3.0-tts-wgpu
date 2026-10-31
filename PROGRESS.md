@@ -91,5 +91,7 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
 - bisect 结论：frames=0、embeds=3.7e-7、layer0 的 rms/q/k/v=1e-7、**rope 内核经独立
   numpy 复算验证 3.7e-8（第一版 numpy 金标有 in-place view bug，内核无误）**；
   发散点锁定 attention 输出（0.73）。已排除：双向注意力（更差 0.81）、theta=10000（0.79）。
-- 下一步：python 侧用 SDPA-math 显式重算 layer-0 attention 对照；检查 audio Qwen2
-  的 rope/attention 配置细节（transformers 4.57 的 Qwen2Attention 实例参数）。
+- 下一步：细读 audio_tokenizer/rope.py 的完整 apply（idx_theta 的 reshape/broadcast
+  细节）——交错+base10000 已试但仍 0.787，两种约定持平说明差异可能在 rope 之外的
+  广播细节或 attention 内部（如 scale/位置偏移）；对照实验已就绪（layer0_parts_check
+  的 l0_attn golden = o_proj 输入 hook，是 torch 真实注意力输出）。
