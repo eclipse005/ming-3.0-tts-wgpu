@@ -117,7 +117,7 @@ impl VaeDecoder {
             self.ops.kv_write(&k, kc, t, 0, KV_CAP, KV_HEADS);
             self.ops.kv_write(&v, vc, t, 0, KV_CAP, KV_HEADS);
             let attn = self.ops.attend(
-                &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN)
+                &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, KV_CAP)
                 .with_window(WINDOW as usize),
                 &q,
                 kc,

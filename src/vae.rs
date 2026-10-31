@@ -119,7 +119,8 @@ impl VaeEncoder {
             self.ops.kv_write(&k, kc, t, 0, KV_CAP, KV_HEADS);
             self.ops.kv_write(&v, vc, t, 0, KV_CAP, KV_HEADS);
             let attn = self.ops.attend(
-                &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN).with_window(64),
+                &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, KV_CAP)
+                    .with_window(64),
                 &q,
                 kc,
                 vc,
@@ -212,7 +213,8 @@ impl VaeEncoder {
             out.push(("l0_kcache".into(), kk));
         }
         let attn = self.ops.attend(
-            &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN).with_window(64),
+            &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, KV_CAP)
+                .with_window(64),
             &q,
             kc,
             vc,

@@ -14,6 +14,10 @@ pub const XH: usize = 1024; // transformer width
 pub const ZC: usize = 64; // latent channels
 pub const XHEADS: usize = 16;
 pub const XFF: usize = 4096;
+/// KV cache capacity per head for the DiT. One token per block is all the
+/// sampler ever puts there, so this is headroom, not a requirement; it is now
+/// a kernel parameter instead of a literal inside the shader.
+pub const DIT_KV_CAP: usize = 512;
 pub const STEPS: usize = 10;
 
 struct XBlock {
@@ -165,7 +169,7 @@ impl DitEngine {
             self.ops.kv_write(&k, kc, t, 0, 512, XHEADS);
             self.ops.kv_write(&v, vc, t, 0, 512, XHEADS);
             let attn = self.ops.attend(
-                &AttendParams::full(t, 64, XH),
+                &AttendParams::full(t, 64, XH, DIT_KV_CAP),
                 &q,
                 kc,
                 vc,

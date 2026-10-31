@@ -275,7 +275,8 @@ fn main(
 "#;
 
 /// GQA attention for one query token per (head, token) workgroup.
-/// K/V caches: [n_kv_heads * 512 * 64] f32, head-major.
+/// K/V caches: [n_kv_heads * cap * 64] f32, head-major (cap comes from the
+/// uniform, so the same kernel serves every stack regardless of its cache size).
 /// Causal: query at position q_pos_base + t attends 0..=q_pos_base + t.
 pub const ATTEND: &str = r#"
 struct Params {
@@ -287,6 +288,7 @@ struct Params {
     qpos_max: u32,
     stride: u32,       // q/y row stride in f32 (hidden size)
     window: u32,       // sliding window (0 = full causal from position 0)
+    cap: u32,          // per-head KV cache capacity in tokens
 }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> q: array<f32>;   // [T, 896]
@@ -309,7 +311,7 @@ fn main(
     if (p.full > 0u) { qpos = p.qpos_max; }
     let lo = select(0u, max(qpos, p.window - 1u) - (p.window - 1u), p.window > 0u);
     let qbase = t * p.stride + head * 64u;
-    let kbase = kvh * 512u * 64u;
+    let kbase = kvh * p.cap * 64u;
     let d = lid.x;
 
     // scores for positions lo..=qpos (each lane owns pos d, d+64, ...)

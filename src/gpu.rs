@@ -53,11 +53,26 @@ fn max_pending() -> usize {
         .unwrap_or(MAX_PENDING)
 }
 
+/// Every backend wgpu can drive a compute queue on. Vulkan is preferred on
+/// Windows/Linux (DX12 enumeration costs ~1s and Vulkan is the tested path on
+/// Pascal); Metal is what macOS exposes; GL is the last resort.
+fn backends() -> Backends {
+    Backends::VULKAN | Backends::METAL | Backends::DX12 | Backends::GL
+}
+
+fn backend_rank(b: wgpu::Backend) -> u8 {
+    match b {
+        wgpu::Backend::Vulkan => 0,
+        wgpu::Backend::Metal => 1,
+        wgpu::Backend::Dx12 => 2,
+        wgpu::Backend::Gl => 3,
+        _ => 4,
+    }
+}
+
 fn instance() -> Instance {
-    // Vulkan first on Windows: DX12 enumeration costs ~1s and Vulkan is the
-    // tested path on Pascal (qwen3-asr-wgpu perf.md).
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-    desc.backends = Backends::VULKAN | Backends::DX12;
+    desc.backends = backends();
     Instance::new(desc)
 }
 
@@ -80,19 +95,19 @@ pub fn list_adapters() -> Vec<String> {
 impl Gpu {
     pub fn new() -> Result<Self> {
         let inst = instance();
-        let adapters =
-            pollster::block_on(inst.enumerate_adapters(Backends::VULKAN | Backends::DX12));
-        let mut picked = None;
+        let adapters = pollster::block_on(inst.enumerate_adapters(backends()));
+        let mut picked: Option<(u8, wgpu::Adapter)> = None;
         for adapter in adapters {
             let info = adapter.get_info();
             if info.device_type == wgpu::DeviceType::Cpu {
                 continue;
             }
-            picked = Some(adapter);
-            if info.backend == wgpu::Backend::Vulkan {
-                break; // prefer Vulkan over DX12 when both expose the device
+            let rank = backend_rank(info.backend);
+            if picked.as_ref().map_or(true, |(best, _)| rank < *best) {
+                picked = Some((rank, adapter));
             }
         }
+        let picked = picked.map(|(_, a)| a);
         let adapter = picked.context("no discrete/integrated GPU adapter found")?;
         let info = adapter.get_info();
         let (device, queue) = pollster::block_on(async {
@@ -100,7 +115,10 @@ impl Gpu {
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("ming-tts"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    // Take what the adapter offers instead of wgpu's conservative
+                    // baseline: bigger workgroups and storage bindings become
+                    // available on capable cards without changing any shader.
+                    required_limits: adapter.limits(),
                     ..Default::default()
                 })
                 .await

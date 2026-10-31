@@ -113,7 +113,7 @@ impl LlmEngine {
         q_pos_base: usize,
     ) -> Result<Buffer> {
         Ok(self.ops.attend(
-            &AttendParams::causal(t, q_pos_base, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN),
+            &AttendParams::causal(t, q_pos_base, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, KV_CAP),
             q,
             kc,
             vc,

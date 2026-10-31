@@ -116,11 +116,20 @@ pub struct AttendParams {
     pub stride: usize,
     /// 0 = plain causal from position 0; n = keep the last n positions.
     pub window: usize,
+    /// KV cache capacity per head, in tokens.
+    pub cap: usize,
 }
 
 impl AttendParams {
     /// Causal, no sliding window (the LLM's attention).
-    pub fn causal(t_q: usize, q_pos_base: usize, heads_per_kv: usize, head_dim: usize, stride: usize) -> Self {
+    pub fn causal(
+        t_q: usize,
+        q_pos_base: usize,
+        heads_per_kv: usize,
+        head_dim: usize,
+        stride: usize,
+        cap: usize,
+    ) -> Self {
         Self {
             t_q,
             q_pos_base,
@@ -130,12 +139,13 @@ impl AttendParams {
             qpos_max: 0,
             stride,
             window: 0,
+            cap,
         }
     }
 
     /// Bidirectional over the whole sequence (the DiT's attention: no GQA,
     /// every query head owns its own k/v head).
-    pub fn full(t_q: usize, head_dim: usize, stride: usize) -> Self {
+    pub fn full(t_q: usize, head_dim: usize, stride: usize, cap: usize) -> Self {
         Self {
             t_q,
             q_pos_base: 0,
@@ -145,6 +155,7 @@ impl AttendParams {
             qpos_max: t_q.saturating_sub(1),
             stride,
             window: 0,
+            cap,
         }
     }
 
@@ -299,7 +310,7 @@ impl Ops {
         n_q_heads: usize,
     ) -> Buffer {
         let y = self.gpu.storage((p.t_q * p.stride * 4) as u64, "attn.y");
-        let mut u = [0u8; 32];
+        let mut u = [0u8; 48];
         u[0..4].copy_from_slice(&(p.t_q as u32).to_le_bytes());
         u[4..8].copy_from_slice(&(p.q_pos_base as u32).to_le_bytes());
         u[8..12].copy_from_slice(&(p.heads_per_kv as u32).to_le_bytes());
@@ -308,6 +319,7 @@ impl Ops {
         u[20..24].copy_from_slice(&(p.qpos_max as u32).to_le_bytes());
         u[24..28].copy_from_slice(&(p.stride as u32).to_le_bytes());
         u[28..32].copy_from_slice(&(p.window as u32).to_le_bytes());
+        u[32..36].copy_from_slice(&(p.cap as u32).to_le_bytes());
         self.k_attend
             .run(&self.gpu, &u, &[q, kc, vc], &y, n_q_heads as u32, p.t_q as u32);
         y
