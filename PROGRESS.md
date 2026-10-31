@@ -71,8 +71,10 @@ cargo test --release -- --test-threads=1
 
 ### 运行期环境变量
 
-**没有必需项**。可选：`MING_CAMPPLUS_ONNX`（campplus.onnx 路径）、
-`ORT_DYLIB_PATH`（onnxruntime.dll，默认会去 conda 环境里找）。
+合成不带提示音的用例（A1/A2/B*/C*/D*/E*/F*/G*/H*）不需要任何额外配置。
+带提示音 / `--use_spk_emb` 的用例要能加载 onnxruntime：按 `ORT_DYLIB_PATH` →
+`MING_ONNXRUNTIME_DIR` → `./onnxruntime.dll` → 本机 conda 路径的顺序查找，
+换机器时通常要设第一个。`MING_CAMPPLUS_ONNX` 可覆盖 campplus.onnx 路径。
 
 ### 调试开关
 
@@ -131,7 +133,7 @@ set PY=C:\Users\ADMIN\miniconda3\envs\videolingo\python.exe
 | `src/audio.rs` | wav 读写 + torchaudio 重采样 | 写盘逐字节复刻 libsndfile |
 | `src/weights.rs` | safetensors 加载（bf16 原样） | 全量拷进 RAM（~2.9 GB） |
 | `src/golden.rs` | npy 读取 + rel_l2 | CLI 的 `MING_NOISE_GOLDEN` 也用它 |
-| `src/parity.rs` | parity 测试（`#cfg(test)`） | 与各模块内测试合计 54 个 |
+| `src/parity.rs` | parity 测试（`#[cfg(test)]`） | 与各模块内测试合计 54 个 |
 
 ## 4. 验收数据
 
