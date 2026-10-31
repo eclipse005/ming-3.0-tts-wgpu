@@ -21,7 +21,7 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
 | M0 | 骨架：gpu 初始化 + bf16 权重加载 + rmsnorm/gemv 内核 + 单层 parity | rel_l2 < 1e-5 | ✅ 2026-10-31（rmsnorm 1.0e-7 / gemv 3.0e-7，Vulkan 上 P104-100 实测） |
 | M1 | LLM：prefill + KV 解码 + stop head | 停止步数强断言（60+ 文本/seed） | ✅ 2026-10-31（真实序列 40 步重放：z rel_l2 8.1e-7、prob 差 3.9e-6、stop_step=40 与 Python 一致；多文本/seed 批量断言留 M5 验收一并跑） |
 | M2 | DiT + Aggregator（固定 seed 噪声注入） | latent rel_l2 < 2e-3 | ✅ 2026-10-31（41 步独立对拍 worst 1.12e-3；首链 y 轨迹 3e-4；单次 dit_forward 1.26e-4） |
-| M3 | VAE Encoder（prompt → latent） | 与 Python 导出 latent 对拍 | ⬜ |
+| M3 | VAE Encoder（prompt → latent） | 与 Python 导出 latent 对拍 | 🔨 定位中：frames/fc1/fc2/embeds ✓ 3.7e-7；layer0 的 q/k/v/rope ✓ 1e-7；**发散点 = attention 输出（0.73）**，双向/θ=10000 假设已排除；下一步用 torch SDPA-math 对照 |
 | M4 | VAE Decoder + iSTFT 全链路 | 频谱 L2 + 时长 + 试听 | ⬜ |
 | M5 | 性能调优 + 全参数验收 | params_test/ 36 样本对齐 | ⬜ |
 
@@ -79,3 +79,17 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
 - **开放问题**：torch 的 (pred, null) 分解随调用上下文（cfm.sample 内 vs 直接
   forward_with_cfg）出现 (δ, 1.5δ) 漂移，而速度 3p−2n 与积分链 y 完全不变 ——
   已在测试中注明，断言只放在不变量（y 链）上。
+
+## M3 记录（2026-10-31）
+
+- 结构澄清：0.5b 的 audio encoder = Qwen2Model（24 层 896 因果）+ pad_patch_insert_cls
+  （每 4 帧插 cls）+ 4 层 aggregator + fc3 → 对角高斯；`norm` LayerNorm 在 forward 中
+  未使用；whisper 模块（semantic）在 0.5b 未启用 —— **全部复用 M1 内核族，零新内核**。
+- dump_m3.py：waveform/frames/embeds/layer0 子模块/enc_out/agg_out/mean/std/latent/eps。
+- vae.rs：frames 宿主 unfold、fc1（无 bias）fc2、24 层因果栈、patch+cls 宿主拼装、
+  4 层栈、cls 抽取（每 5 行取第 5）、fc3 → mean/std（logvar=fc3 后 64 维，std=exp(0.5·logvar)）。
+- bisect 结论：frames=0、embeds=3.7e-7、layer0 的 rms/q/k/v=1e-7、**rope 内核经独立
+  numpy 复算验证 3.7e-8（第一版 numpy 金标有 in-place view bug，内核无误）**；
+  发散点锁定 attention 输出（0.73）。已排除：双向注意力（更差 0.81）、theta=10000（0.79）。
+- 下一步：python 侧用 SDPA-math 显式重算 layer-0 attention 对照；检查 audio Qwen2
+  的 rope/attention 配置细节（transformers 4.57 的 Qwen2Attention 实例参数）。

@@ -13,6 +13,7 @@ mod nn;
 mod parity;
 mod qwen_lm;
 mod shaders;
+mod vae;
 mod weights;
 
 #[derive(Parser)]

@@ -466,3 +466,173 @@ mod m2_cross_tests {
         assert!(e < 1e-4, "two rust paths disagree: {e:.3e}");
     }
 }
+
+#[cfg(test)]
+mod m3_tests {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::vae::VaeEncoder;
+    use crate::weights::Weights;
+
+    #[test]
+    fn vae_encoder_matches_python() {
+        let wf = golden("m3_waveform.npy").unwrap();
+        let mean = golden("m3_mean.npy").unwrap();
+        let std = golden("m3_std.npy").unwrap();
+        let latent = golden("m3_latent.npy").unwrap();
+        let eps = golden("m3_eps.npy").unwrap();
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let enc = VaeEncoder::load(gpu, &weights).unwrap();
+        let (gm, gs, p) = enc.encode_params(&wf.data).unwrap();
+        println!("patches={p} mean rel_l2={:.3e} std rel_l2={:.3e}",
+                 rel_l2(&gm, &mean.data), rel_l2(&gs, &std.data));
+        assert_eq!(p, mean.shape[0]);
+        assert!(rel_l2(&gm, &mean.data) < 1e-3, "mean >= 1e-3");
+        assert!(rel_l2(&gs, &std.data) < 1e-3, "std >= 1e-3");
+        // latent = mean + std * eps with the python-drawn eps
+        let mut lat = vec![0f32; gm.len()];
+        for i in 0..gm.len() {
+            lat[i] = gm[i] + gs[i] * eps.data[i];
+        }
+        let el = rel_l2(&lat, &latent.data);
+        println!("latent rel_l2={el:.3e}");
+        assert!(el < 1e-3, "latent >= 1e-3");
+    }
+}
+
+#[cfg(test)]
+mod m3_bisect_tests {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::vae::VaeEncoder;
+    use crate::weights::Weights;
+
+    #[test]
+    fn vae_encoder_bisect() {
+        let g = |n| read_npy(&std::path::Path::new(&std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
+            .join(n)).unwrap();
+        let wf = g("m3_waveform.npy").data;
+        let frames = g("m3_frames.npy").data;
+        let embeds = g("m3_embeds.npy").data;
+        let enc_out = g("m3_enc_out.npy").data;
+        let agg_out = g("m3_agg_out.npy").data;
+        // stage 1: host frame unfold
+        let t_frames = frames.len() / 882;
+        let mut my_frames = vec![0f32; frames.len()];
+        for t in 0..t_frames {
+            let start = t * 882;
+            let end = (start + 882).min(wf.len());
+            my_frames[t * 882..t * 882 + (end - start)]
+                .copy_from_slice(&wf[start..end]);
+        }
+        println!("frames rel_l2={:.3e}", rel_l2(&my_frames, &frames));
+        assert!(rel_l2(&my_frames, &frames) < 1e-6, "frames");
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let enc = VaeEncoder::load(gpu, &weights).unwrap();
+        // stage 2: fc1+fc2
+        let e = enc.embed_check(&my_frames, t_frames).unwrap();
+        println!("embeds rel_l2={:.3e}", rel_l2(&e, &embeds));
+        assert!(rel_l2(&e, &embeds) < 1e-4, "embeds");
+        // stage 3: 24-layer encoder (layer 0 first)
+        let layer0 = g("m3_layer0.npy").data;
+        let l0 = enc.stack_range_check(&e, t_frames, 0..1).unwrap();
+        println!("layer0 rel_l2={:.3e}", rel_l2(&l0, &layer0));
+        assert!(rel_l2(&l0, &layer0) < 1e-4, "layer0");
+        let eo = enc.encode_stack_check(&e, t_frames).unwrap();
+        println!("enc_out rel_l2={:.3e}", rel_l2(&eo, &enc_out));
+        assert!(rel_l2(&eo, &enc_out) < 1e-3, "enc_out");
+        // stage 4: patch/cls + 4-layer aggregator
+        let ao = enc.agg_check(&eo, t_frames).unwrap();
+        println!("agg_out rel_l2={:.3e}", rel_l2(&ao, &agg_out));
+        assert!(rel_l2(&ao, &agg_out) < 1e-3, "agg_out");
+    }
+}
+
+#[cfg(test)]
+mod m3_layer0_tests {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::vae::VaeEncoder;
+    use crate::weights::Weights;
+
+    #[test]
+    fn vae_layer0_parts() {
+        let g = |n| read_npy(&std::path::Path::new(&std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
+            .join(n)).unwrap();
+        let embeds = g("m3_embeds.npy").data;
+        let t = embeds.len() / 896;
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let enc = VaeEncoder::load(gpu, &weights).unwrap();
+        let dir = std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
+        for (name, got) in enc.layer0_parts_check(&embeds, t).unwrap() {
+                        let want_npy = if name == "l0_attn" {
+                read_npy(&std::path::Path::new(&dir).join("m3_l0_attn.npy")).unwrap()
+            } else {
+                read_npy(&std::path::Path::new(&dir).join(format!("m3_{name}.npy"))).unwrap()
+            };
+            let want = want_npy.data;
+            let e = rel_l2(&got, &want);
+            println!("{name}: rel_l2={e:.3e}");
+            if name != "l0_attn" { assert!(e < 1e-4, "{name} rel_l2 {e:.3e}"); } else { println!("l0_attn rel_l2={e:.3e}"); }
+        }
+    }
+}
+
+#[cfg(test)]
+mod m3_rope_tests {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::nn::kernel;
+    use crate::shaders;
+    use crate::qwen_lm::{Q_HEADS, ROPE_THETA};
+
+    #[test]
+    fn vae_rope_matches_numpy() {
+        let dir = std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
+        let q = read_npy(&std::path::Path::new(&dir).join("m3_l0_q_proj.npy")).unwrap();
+        let want = read_npy(&std::path::Path::new(&dir).join("m3_l0_q_rope.npy")).unwrap();
+        let t = q.shape[0];
+        let gpu = Gpu::new().unwrap();
+        let (mut cos, mut sin) = (vec![0f32; 512 * 32], vec![0f32; 512 * 32]);
+        for p in 0..512 {
+            for i in 0..32 {
+                let f = ROPE_THETA.powf((2 * i) as f64 / 64.0).recip();
+                cos[p * 32 + i] = (p as f64 * f).cos() as f32;
+                sin[p * 32 + i] = (p as f64 * f).sin() as f32;
+            }
+        }
+        let cb = gpu.upload_f32(&cos, "c");
+        let sb = gpu.upload_f32(&sin, "s");
+        let qb = gpu.upload_f32(&q.data, "q");
+        let k = kernel(&gpu, shaders::ROPE, 2);
+        let mut u = [0u8; 16];
+        u[0..4].copy_from_slice(&(Q_HEADS as u32).to_le_bytes());
+        u[4..8].copy_from_slice(&0u32.to_le_bytes());
+        u[8..12].copy_from_slice(&0u32.to_le_bytes());
+        k.run(&gpu, &u, &[&cb, &sb], &qb, t as u32, 1);
+        let got = gpu.read_f32(&qb, t * 896).unwrap();
+        let e = rel_l2(&got, &want.data);
+        let mut shown = 0;
+        for t2 in 0..168 {
+            for h in 0..14 {
+                for d in 0..64 {
+                    let i = t2 * 896 + h * 64 + d;
+                    if (got[i] - want.data[i]).abs() > 1e-3 && shown < 6 {
+                        println!("t{t2} h{h} d{d}: got={:.4} want={:.4} in_q={:.4}",
+                                 got[i], want.data[i], q.data[i]);
+                        shown += 1;
+                    }
+                }
+            }
+        }
+        println!("rope rel_l2={e:.3e}");
+        assert!(e < 1e-5, "rope {e:.3e}");
+    }
+}
