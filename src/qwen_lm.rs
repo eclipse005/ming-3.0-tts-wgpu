@@ -135,7 +135,11 @@ impl LlmEngine {
 
     fn transformer(&self, x: Buffer, t: usize, pos_base: usize) -> Result<Buffer> {
         let mut h = x;
-        for layer in &self.layers {
+        // MING_ACT_RANGE=1 prints the residual stream's magnitude per layer.
+        // It is how we answer "can this checkpoint run in fp16": fp16 tops out
+        // at 65504, so whichever layer crosses that is the one that would NaN.
+        let probe = std::env::var("MING_ACT_RANGE").is_ok();
+        for (li, layer) in self.layers.iter().enumerate() {
             let a = self.rms(&h, &layer.norm1, t);
             let q = self.mrow(&layer.q, &a, t)?;
             let k = self.mrow(&layer.k, &a, t)?;
@@ -153,6 +157,12 @@ impl LlmEngine {
             let sil = self.silu_mul(&g, &up, t * FF);
             let d = self.mrow(&layer.down, &sil, t)?;
             h = self.add(&h, &d, t * HIDDEN);
+            if probe {
+                if let Ok(v) = self.gpu.read_f32(&h, t * HIDDEN) {
+                    let m = v.iter().fold(0f32, |a, b| a.max(b.abs()));
+                    println!("  layer {li:2}: residual absmax {m:.4e}");
+                }
+            }
         }
         Ok(h)
     }
