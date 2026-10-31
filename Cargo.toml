@@ -1,0 +1,18 @@
+[package]
+name = "ming-tts-wgpu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = "30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+memmap2 = "0.9"
+safetensors = "0.4"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
