@@ -99,3 +99,15 @@ t≥64 有窗口边界残差（≤0.03 mean-abs）。ATTEND 内核的 window 参
 下一轮微调后即可收口 M3（mean/std 门限 1e-3）。
 注意：rope.py（torchtune 式）与 whisper 模块在 0.5b 中是死代码，真正生效的是
 Qwen2Model 自带的 Qwen2Attention+Qwen2RotaryEmbedding。
+
+## M3 续（2026-11-01b）
+
+- numpy 参考确认：split-half@1e6 + window64 的 attention 与 golden rel 1.67e-7（attention 层面完全对上）。
+- Rust 症状精确定位：my attend 输出 tok0-2 与 numpy 因果逐位一致（diff 0.0000），
+  tok4 差 0.032、tok8 差 0.52、tok16 差 1.20、tok64 差 1.06 —— **误差随 token 索引增长**，
+  高度怀疑 KV cache 写入只生效了位置 0（或 attend 读到的 cache 是陈旧的）。
+- 下一步（精确续接点）：layer0_parts_check 里给 kv_write 之后的 kc 加 readback dump
+  （对比 numpy rope 后的 k）——上一轮 patch 因 vae.rs 中 MING_VAE_FULL env 行导致
+  anchor 不匹配未打入，需以实际文本（含 env 行）为锚重打；parity 测试里 l0_kcache
+  分支已预留（continue 跳过）。
+- 注意：layer0_parts 的 au[16..20] 是 MING_VAE_FULL env 行（默认 causal=0 ✓）。
