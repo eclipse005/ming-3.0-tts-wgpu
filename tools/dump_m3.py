@@ -40,6 +40,13 @@ def enc_spy(waveform, waveform_length):
             nonlocal h
             h = out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
         l0 = enc_mod.encoder.layers[0]
+        orig_qkv = l0.self_attn.qkv_attention
+        def qkv_spy(q, k, v, past_key_values=None):
+            if "l0_q_rope" not in cap:
+                cap["l0_q_rope"] = q[0].detach().float().cpu().numpy()
+                cap["l0_k_rope"] = k[0].detach().float().cpu().numpy()
+            return orig_qkv(q, k, v, past_key_values=past_key_values)
+        l0.self_attn.qkv_attention = qkv_spy
         l0.self_attn.o_proj.register_forward_hook(
             lambda mod, i, o: cap.__setitem__("l0_attn", i[0][0].detach().float().cpu().numpy()))
         for nm in ("q_proj", "k_proj", "v_proj", "o_proj"):
@@ -75,7 +82,7 @@ with torch.inference_mode():
 wf = cap["waveform"]
 print(f"waveform {wf.shape} len={cap['len']} frames={cap['frame_num']} "
       f"latent={cap['latent'].shape}")
-for k in ("waveform", "frames", "embeds", "l0_attnln", "l0_attn", "l0_q_proj", "l0_k_proj", "l0_v_proj", "l0_o_proj", "l0_gate_proj", "l0_up_proj", "l0_down_proj", "layer0", "enc_out", "agg_out", "mean", "std", "latent"):
+for k in ("waveform", "frames", "embeds", "l0_q_rope", "l0_k_rope", "l0_attnln", "l0_attn", "l0_q_proj", "l0_k_proj", "l0_v_proj", "l0_o_proj", "l0_gate_proj", "l0_up_proj", "l0_down_proj", "layer0", "enc_out", "agg_out", "mean", "std", "latent"):
     np.save(f"{OUT}/m3_{k}.npy", cap[k])
 np.save(f"{OUT}/m3_eps.npy",
         (cap["latent"] - cap["mean"]) / np.maximum(cap["std"], 1e-8))

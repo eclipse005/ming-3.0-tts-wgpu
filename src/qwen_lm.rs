@@ -193,7 +193,7 @@ impl LlmEngine {
         q_pos_base: usize,
     ) -> Result<Buffer> {
         let y = self.gpu.storage((t * HIDDEN * 4) as u64, "attn.y");
-        let mut u = [0u8; 28];
+        let mut u = [0u8; 32];
         u[0..4].copy_from_slice(&(t as u32).to_le_bytes());
         u[4..8].copy_from_slice(&(q_pos_base as u32).to_le_bytes());
         u[8..12].copy_from_slice(&((Q_HEADS / KV_HEADS) as u32).to_le_bytes());
@@ -201,6 +201,7 @@ impl LlmEngine {
         u[16..20].copy_from_slice(&0u32.to_le_bytes()); // full = 0 (causal)
         u[20..24].copy_from_slice(&0u32.to_le_bytes()); // qpos_max unused
         u[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes());
+        u[28..32].copy_from_slice(&0u32.to_le_bytes()); // window = 0 (LLM full causal)
         self.k_attend.run(&self.gpu, &u, &[q, kc, vc], &y, Q_HEADS as u32, t as u32);
         Ok(y)
     }

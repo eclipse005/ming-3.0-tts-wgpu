@@ -207,6 +207,7 @@ struct Params {
     full: u32,         // 1 = bidirectional: every row attends 0..=qpos_max
     qpos_max: u32,
     stride: u32,       // q/y row stride in f32 (hidden size)
+    window: u32,       // sliding window (0 = full causal from position 0)
 }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> q: array<f32>;   // [T, 896]
@@ -227,25 +228,28 @@ fn main(
     let kvh = head / p.heads_per_kv;
     var qpos = p.q_pos_base + t;
     if (p.full > 0u) { qpos = p.qpos_max; }
+    let lo = select(0u, max(qpos, p.window - 1u) - (p.window - 1u), p.window > 0u);
     let qbase = t * p.stride + head * 64u;
     let kbase = kvh * 512u * 64u;
     let d = lid.x;
 
-    // scores for positions 0..=qpos (each lane owns pos d, d+64, ...)
+    // scores for positions lo..=qpos (each lane owns pos d, d+64, ...)
     var pmax = -3.0e38;
     var pos = d;
     loop {
         if (pos > qpos) { break; }
-        var s = 0.0;
-        var dd = 0u;
-        loop {
-            if (dd >= 64u) { break; }
-            s = s + q[qbase + dd] * kc[kbase + pos * 64u + dd];
-            dd = dd + 1u;
+        if (pos >= lo) {
+            var s = 0.0;
+            var dd = 0u;
+            loop {
+                if (dd >= 64u) { break; }
+                s = s + q[qbase + dd] * kc[kbase + pos * 64u + dd];
+                dd = dd + 1u;
+            }
+            s = s * p.scale;
+            sc[pos] = s;
+            pmax = max(pmax, s);
         }
-        s = s * p.scale;
-        sc[pos] = s;
-        pmax = max(pmax, s);
         pos = pos + 64u;
     }
     red[d] = pmax;
@@ -264,9 +268,11 @@ fn main(
     pos = d;
     loop {
         if (pos > qpos) { break; }
-        let wv = exp(sc[pos] - m);
-        wgt[pos] = wv;
-        psum = psum + wv;
+        if (pos >= lo) {
+            let wv = exp(sc[pos] - m);
+            wgt[pos] = wv;
+            psum = psum + wv;
+        }
         pos = pos + 64u;
     }
     red[d] = psum;
@@ -282,7 +288,7 @@ fn main(
 
     // weighted V sum: lane d owns output dims d (d < 64)
     var acc = 0.0;
-    pos = 0u;
+    pos = lo;
     loop {
         if (pos > qpos) { break; }
         acc = acc + wgt[pos] * vc[kbase + pos * 64u + d];

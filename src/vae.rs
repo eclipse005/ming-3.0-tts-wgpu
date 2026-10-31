@@ -100,13 +100,10 @@ impl VaeEncoder {
         let agg = (0..AGG_LAYERS)
             .map(|i| qlayer(&format!("audio.encoder.aggregator.layers.{i}")))
             .collect::<Result<Vec<_>>>()?;
-        // The audio Qwen2 stack uses torchtune-style rotary (audio_tokenizer/
-        // rope.py): INTERLEAVED pairs (2i, 2i+1) with base 10000 — unlike the
-        // LLM's Qwen2 rotate-half with theta 1e6.
         let (mut cos, mut sin) = (vec![0f32; KV_CAP * 32], vec![0f32; KV_CAP * 32]);
         for pos in 0..KV_CAP {
             for i in 0..32 {
-                let freq = 10_000f64.powf((2 * i) as f64 / 64.0).recip();
+                let freq = ROPE_THETA.powf((2 * i) as f64 / 64.0).recip();
                 cos[pos * 32 + i] = (pos as f64 * freq).cos() as f32;
                 sin[pos * 32 + i] = (pos as f64 * freq).sin() as f32;
             }
@@ -167,10 +164,7 @@ impl VaeEncoder {
             let q = self.mrow(&layer.q, &a, t)?;
             let k = self.mrow(&layer.k, &a, t)?;
             let v = self.mrow(&layer.v, &a, t)?;
-            let mut ru = [0u8; 16];
-            ru[0..4].copy_from_slice(&(Q_HEADS as u32).to_le_bytes());
-            ru[4..8].copy_from_slice(&0u32.to_le_bytes());
-            ru[8..12].copy_from_slice(&1u32.to_le_bytes()); // interleaved (torchtune)
+            let ru = uni2(Q_HEADS as u32, 0);
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &q, t as u32, 1);
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
             let kc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.kc");
@@ -181,14 +175,16 @@ impl VaeEncoder {
             ku[8..12].copy_from_slice(&(KV_HEADS as u32).to_le_bytes());
             self.k_kvwrite.run(&self.gpu, &ku, &[&k], &kc, t as u32, 1);
             self.k_kvwrite.run(&self.gpu, &ku, &[&v], &vc, t as u32, 1);
-            let mut au = [0u8; 28];
+            let mut au = [0u8; 32];
             au[0..4].copy_from_slice(&(t as u32).to_le_bytes());
             au[4..8].copy_from_slice(&0u32.to_le_bytes()); // q_pos_base
             au[8..12].copy_from_slice(&((Q_HEADS / KV_HEADS) as u32).to_le_bytes());
             au[12..16].copy_from_slice(&(1.0f32 / (HEAD_DIM as f32).sqrt()).to_le_bytes());
             au[16..20].copy_from_slice(&0u32.to_le_bytes()); // causal
-            au[20..24].copy_from_slice(&0u32.to_le_bytes());
-            au[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes());
+            au[20..24].copy_from_slice(&0u32.to_le_bytes()); // qpos_max
+            au[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes()); // stride
+            au[28..32].copy_from_slice(&64u32.to_le_bytes()); // sliding window
+            au[28..32].copy_from_slice(&64u32.to_le_bytes()); // sliding window
             let attn = self.gpu.storage((t * HIDDEN * 4) as u64, "v.attn");
             self.k_attend.run(&self.gpu, &au, &[&q, &kc, &vc], &attn, Q_HEADS as u32, t as u32);
             let o = self.mrow(&layer.o, &attn, t)?;
@@ -223,10 +219,7 @@ impl VaeEncoder {
             let q = self.mrow(&layer.q, &a, t)?;
             let k = self.mrow(&layer.k, &a, t)?;
             let v = self.mrow(&layer.v, &a, t)?;
-            let mut ru = [0u8; 16];
-            ru[0..4].copy_from_slice(&(Q_HEADS as u32).to_le_bytes());
-            ru[4..8].copy_from_slice(&0u32.to_le_bytes());
-            ru[8..12].copy_from_slice(&1u32.to_le_bytes()); // interleaved (torchtune)
+            let ru = uni2(Q_HEADS as u32, 0);
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &q, t as u32, 1);
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
             let kc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.kc");
@@ -237,14 +230,16 @@ impl VaeEncoder {
             ku[8..12].copy_from_slice(&(KV_HEADS as u32).to_le_bytes());
             self.k_kvwrite.run(&self.gpu, &ku, &[&k], &kc, t as u32, 1);
             self.k_kvwrite.run(&self.gpu, &ku, &[&v], &vc, t as u32, 1);
-            let mut au = [0u8; 28];
+            let mut au = [0u8; 32];
             au[0..4].copy_from_slice(&(t as u32).to_le_bytes());
             au[4..8].copy_from_slice(&0u32.to_le_bytes());
             au[8..12].copy_from_slice(&((Q_HEADS / KV_HEADS) as u32).to_le_bytes());
             au[12..16].copy_from_slice(&(1.0f32 / (HEAD_DIM as f32).sqrt()).to_le_bytes());
-            au[16..20].copy_from_slice(&0u32.to_le_bytes());
-            au[20..24].copy_from_slice(&0u32.to_le_bytes());
-            au[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes());
+            au[16..20].copy_from_slice(&0u32.to_le_bytes()); // causal
+            au[20..24].copy_from_slice(&0u32.to_le_bytes()); // qpos_max
+            au[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes()); // stride
+            au[28..32].copy_from_slice(&64u32.to_le_bytes()); // sliding window
+            au[28..32].copy_from_slice(&64u32.to_le_bytes()); // sliding window
             let attn = self.gpu.storage((t * HIDDEN * 4) as u64, "v.attn");
             self.k_attend.run(&self.gpu, &au, &[&q, &kc, &vc], &attn, Q_HEADS as u32, t as u32);
             let o = self.mrow(&layer.o, &attn, t)?;
@@ -303,12 +298,12 @@ impl VaeEncoder {
         ku[8..12].copy_from_slice(&(KV_HEADS as u32).to_le_bytes());
         self.k_kvwrite.run(&self.gpu, &ku, &[&k], &kc, t as u32, 1);
         self.k_kvwrite.run(&self.gpu, &ku, &[&v], &vc, t as u32, 1);
-        let mut au = [0u8; 28];
+        let mut au = [0u8; 32];
         au[0..4].copy_from_slice(&(t as u32).to_le_bytes());
         au[4..8].copy_from_slice(&0u32.to_le_bytes());
         au[8..12].copy_from_slice(&((Q_HEADS / KV_HEADS) as u32).to_le_bytes());
         au[12..16].copy_from_slice(&(1.0f32 / (HEAD_DIM as f32).sqrt()).to_le_bytes());
-        au[16..20].copy_from_slice(&std::env::var("MING_VAE_FULL").map(|_| 1u32).unwrap_or(0u32).to_le_bytes());
+        au[16..20].copy_from_slice(&0u32.to_le_bytes());
         au[20..24].copy_from_slice(&((t - 1) as u32).to_le_bytes());
         au[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes());
         let attn = self.gpu.storage((t * HIDDEN * 4) as u64, "v.attn");

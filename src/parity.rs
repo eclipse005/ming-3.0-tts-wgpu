@@ -543,6 +543,12 @@ mod m3_bisect_tests {
         assert!(rel_l2(&l0, &layer0) < 1e-4, "layer0");
         let eo = enc.encode_stack_check(&e, t_frames).unwrap();
         println!("enc_out rel_l2={:.3e}", rel_l2(&eo, &enc_out));
+        for t2 in [0usize, 1, 2, 4, 8, 32, 63, 64, 100, 167] {
+            let o = t2 * 896;
+            let d: f32 = (0..896).map(|j| (eo[o + j] - enc_out[o + j]).abs()).sum::<f32>() / 896.0;
+            println!("  tok{t2}: meandiff={d:.5} got[:2]={:?} want[:2]={:?}",
+                     &eo[o..o + 2], &enc_out[o..o + 2]);
+        }
         assert!(rel_l2(&eo, &enc_out) < 1e-3, "enc_out");
         // stage 4: patch/cls + 4-layer aggregator
         let ao = enc.agg_check(&eo, t_frames).unwrap();
@@ -579,7 +585,22 @@ mod m3_layer0_tests {
             let want = want_npy.data;
             let e = rel_l2(&got, &want);
             println!("{name}: rel_l2={e:.3e}");
-            if name != "l0_attn" { assert!(e < 1e-4, "{name} rel_l2 {e:.3e}"); } else { println!("l0_attn rel_l2={e:.3e}"); }
+            if name == "l0_attn" {
+                println!("l0_attn vs golden rel_l2={e:.3e}");
+                let npy = read_npy(&std::path::Path::new(&dir).join("m3_l0_attn_numpy_causal.npy")).unwrap();
+                println!("l0_attn vs numpy-causal rel_l2={:.3e}", rel_l2(&got, &npy.data));
+                for t2 in [0usize, 1, 2, 4, 8, 16, 64, 167] {
+                    let o = t2 * 896;
+                    let mut mx = 0f32;
+                    for h in 0..14 {
+                        for d in 0..64 {
+                            let i = o + h * 64 + d;
+                            mx = mx.max((got[i] - npy.data[i]).abs());
+                        }
+                    }
+                    println!("  tok{t2}: max|got-numpy| over heads = {mx:.4}");
+                }
+            } else { assert!(e < 1e-4, "{name} rel_l2 {e:.3e}"); }
         }
     }
 }
@@ -597,13 +618,13 @@ mod m3_rope_tests {
         let dir = std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
         let q = read_npy(&std::path::Path::new(&dir).join("m3_l0_q_proj.npy")).unwrap();
-        let want = read_npy(&std::path::Path::new(&dir).join("m3_l0_q_rope.npy")).unwrap();
+        let want = read_npy(&std::path::Path::new(&dir).join("m3_l0_q_rope_inter.npy")).unwrap();
         let t = q.shape[0];
         let gpu = Gpu::new().unwrap();
         let (mut cos, mut sin) = (vec![0f32; 512 * 32], vec![0f32; 512 * 32]);
         for p in 0..512 {
             for i in 0..32 {
-                let f = ROPE_THETA.powf((2 * i) as f64 / 64.0).recip();
+                let f = 10000f64.powf((2 * i) as f64 / 64.0).recip();
                 cos[p * 32 + i] = (p as f64 * f).cos() as f32;
                 sin[p * 32 + i] = (p as f64 * f).sin() as f32;
             }
@@ -615,7 +636,7 @@ mod m3_rope_tests {
         let mut u = [0u8; 16];
         u[0..4].copy_from_slice(&(Q_HEADS as u32).to_le_bytes());
         u[4..8].copy_from_slice(&0u32.to_le_bytes());
-        u[8..12].copy_from_slice(&0u32.to_le_bytes());
+        u[8..12].copy_from_slice(&1u32.to_le_bytes());
         k.run(&gpu, &u, &[&cb, &sb], &qb, t as u32, 1);
         let got = gpu.read_f32(&qb, t * 896).unwrap();
         let e = rel_l2(&got, &want.data);
