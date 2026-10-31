@@ -3,6 +3,9 @@
 use anyhow::{bail, Context, Result};
 use wgpu::{Backends, Buffer, BufferUsages, Device, Instance, Queue};
 
+// Device/Queue are internally reference counted, so a clone shares the same
+// GPU device -- that is how the LLM, DiT and VAE stages end up on one device.
+#[derive(Clone)]
 pub struct Gpu {
     pub device: Device,
     pub queue: Queue,

@@ -744,3 +744,55 @@ mod m3_fc3_tests {
         }
     }
 }
+
+
+#[cfg(test)]
+mod m4_tests {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::vae_dec::VaeDecoder;
+    use crate::weights::Weights;
+
+    #[test]
+    fn vae_decoder_matches_python() {
+        let latent = golden("m4_latent.npy").unwrap();
+        let fc1 = golden("m4_fc1_out.npy").unwrap();
+        let up = golden("m4_up_out.npy").unwrap();
+        let dec = golden("m4_dec_out.npy").unwrap();
+        let head = golden("m4_head_lin.npy").unwrap();
+        let wav = golden("m4_waveform.npy").unwrap();
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let d = VaeDecoder::load(gpu, &weights).unwrap();
+        let t_lat = latent.shape[0];
+
+        let f = d.fc1_check(&latent.data, t_lat).unwrap();
+        println!("fc1 rel_l2={:.3e} n={} want={}", rel_l2(&f, &fc1.data), f.len(), fc1.data.len());
+        assert_eq!(f.len(), fc1.data.len());
+        assert!(rel_l2(&f, &fc1.data) < 1e-5, "fc1");
+
+        let u = d.upsample_check(&latent.data, t_lat).unwrap();
+        println!("upsample rel_l2={:.3e} n={} want={}", rel_l2(&u, &up.data), u.len(), up.data.len());
+        assert_eq!(u.len(), up.data.len());
+        assert!(rel_l2(&u, &up.data) < 1e-5, "upsample");
+        let t = u.len() / 896;
+
+        let s = d.stack_check(&u, t).unwrap();
+        println!("dec stack rel_l2={:.3e}", rel_l2(&s, &dec.data));
+        assert!(rel_l2(&s, &dec.data) < 1e-4, "dec stack");
+
+        let h = d.head_check(&u, t).unwrap();
+        println!("head lin rel_l2={:.3e}", rel_l2(&h, &head.data));
+        assert!(rel_l2(&h, &head.data) < 1e-4, "head");
+
+        let w = d.decode(&latent.data, t_lat).unwrap();
+        println!("waveform len {} want {} absmax {:.4} want {:.4}",
+                 w.len(), wav.data.len(),
+                 w.iter().fold(0f32, |a, b| a.max(b.abs())),
+                 wav.data.iter().fold(0f32, |a, b| a.max(b.abs())));
+        assert_eq!(w.len(), wav.data.len(), "waveform length");
+        let e = rel_l2(&w, &wav.data);
+        println!("waveform rel_l2={e:.3e}");
+        assert!(e < 1e-3, "waveform {e:.3e}");
+    }
+}

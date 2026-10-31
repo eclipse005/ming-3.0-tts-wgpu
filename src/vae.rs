@@ -19,23 +19,23 @@ const AGG_LAYERS: usize = 4;
 const PATCH: usize = 4;
 const EPS: f32 = 1e-6;
 
-struct Lin {
-    w: Buffer,
-    b: Buffer,
-    rows: usize,
-    in_features: usize,
+pub(crate) struct Lin {
+    pub(crate) w: Buffer,
+    pub(crate) b: Buffer,
+    pub(crate) rows: usize,
+    pub(crate) in_features: usize,
 }
 
-struct QLayer {
-    q: Lin,
-    k: Lin,
-    v: Lin,
-    o: Lin,
-    gate: Lin,
-    up: Lin,
-    down: Lin,
-    n1: Buffer,
-    n2: Buffer,
+pub(crate) struct QLayer {
+    pub(crate) q: Lin,
+    pub(crate) k: Lin,
+    pub(crate) v: Lin,
+    pub(crate) o: Lin,
+    pub(crate) gate: Lin,
+    pub(crate) up: Lin,
+    pub(crate) down: Lin,
+    pub(crate) n1: Buffer,
+    pub(crate) n2: Buffer,
 }
 
 pub struct VaeEncoder {
@@ -59,14 +59,14 @@ pub struct VaeEncoder {
     k_kvwrite: Kernel,
 }
 
-fn uni2(a: u32, b: u32) -> [u8; 16] {
+pub(crate) fn uni2(a: u32, b: u32) -> [u8; 16] {
     let mut u = [0u8; 16];
     u[0..4].copy_from_slice(&a.to_le_bytes());
     u[4..8].copy_from_slice(&b.to_le_bytes());
     u
 }
 
-fn uni1(a: u32) -> [u8; 16] {
+pub(crate) fn uni1(a: u32) -> [u8; 16] {
     uni2(a, 0)
 }
 
@@ -189,7 +189,6 @@ impl VaeEncoder {
             au[20..24].copy_from_slice(&0u32.to_le_bytes()); // qpos_max
             au[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes()); // stride
             au[28..32].copy_from_slice(&64u32.to_le_bytes()); // sliding window
-            au[28..32].copy_from_slice(&64u32.to_le_bytes()); // sliding window
             let attn = self.gpu.storage((t * HIDDEN * 4) as u64, "v.attn");
             self.k_attend.run(&self.gpu, &au, &[&q, &kc, &vc], &attn, Q_HEADS as u32, t as u32);
             let o = self.mrow(&layer.o, &attn, t)?;
@@ -246,7 +245,6 @@ impl VaeEncoder {
             au[16..20].copy_from_slice(&0u32.to_le_bytes()); // causal
             au[20..24].copy_from_slice(&0u32.to_le_bytes()); // qpos_max
             au[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes()); // stride
-            au[28..32].copy_from_slice(&64u32.to_le_bytes()); // sliding window
             au[28..32].copy_from_slice(&64u32.to_le_bytes()); // sliding window
             let attn = self.gpu.storage((t * HIDDEN * 4) as u64, "v.attn");
             self.k_attend.run(&self.gpu, &au, &[&q, &kc, &vc], &attn, Q_HEADS as u32, t as u32);

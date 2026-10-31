@@ -22,7 +22,7 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
 | M1 | LLM：prefill + KV 解码 + stop head | 停止步数强断言（60+ 文本/seed） | ✅ 2026-10-31（真实序列 40 步重放：z rel_l2 8.1e-7、prob 差 3.9e-6、stop_step=40 与 Python 一致；多文本/seed 批量断言留 M5 验收一并跑） |
 | M2 | DiT + Aggregator（固定 seed 噪声注入） | latent rel_l2 < 2e-3 | ✅ 2026-10-31（41 步独立对拍 worst 1.12e-3；首链 y 轨迹 3e-4；单次 dit_forward 1.26e-4） |
 | M3 | VAE Encoder（prompt → latent） | 与 Python 导出 latent 对拍 | ✅ 2026-10-31（24 层栈 1.9e-6 / aggregator 2.1e-6 / mean 1.4e-6 / std 8.3e-7 / latent 1.4e-6） |
-| M4 | VAE Decoder + iSTFT 全链路 | 频谱 L2 + 时长 + 试听 | ⬜ |
+| M4 | VAE Decoder + iSTFT 全链路 | 频谱 L2 + 时长 + 试听 | ✅ 2026-10-31（fc1 1.6e-7 / 上采样 1.5e-7 / 24 层栈 1.5e-6 / head 6.8e-7 / **波形 1.9e-6**，长度 148176 一致） |
 | M5 | 性能调优 + 全参数验收 | params_test/ 36 样本对齐 | ⬜ |
 
 ## M0 记录（2026-10-31）
@@ -134,6 +134,27 @@ token 索引单调增长"的症状，也让"KV cache 只写了位置 0"的怀疑
 vae window=64）；·enc/agg 末端的 `norm` RMSNorm 确实生效（Qwen2Model.forward 末尾
 self.norm），已加 `enc_norm/agg_norm`；·fc3 的 mean/std 是 [row, 128] 的前 64/后 64 维，
 不是交错；·门限收紧到 1e-4。
+
+## M4 记录（2026-10-31，✅ 全绿）
+
+- 结构：latent [42,64] → fc1(64→896) → **nn.Upsample(x4, mode=linear, align_corners=False)**
+  → 24 层 Qwen2（因果 + 滑窗 64）→ 末尾 RMSNorm → head.out(896→3530) →
+  mag=exp(·) 截断 1e2 / phase=arg → iSTFT(n_fft=3528, hop=882, hann, padding="same")。
+- **滑窗 64 在解码器上同样生效**：Python 端确实打印了
+  "Sliding Window Attention is enabled but not implemented for sdpa" 的警告，
+  但 4.57 是把窗口编进 4D mask 的，堆栈 rel_l2 1.5e-6 反证窗口确实生效——
+  警告是误导，以数字为准。
+- 上采样是**插值**不是可学习层（StreamingLinearUpsample 的非流式分支直接调
+  self.upsampler）；align_corners=False 的源坐标 `t*n_in/n_out - 0.5`（负值夹到 0）
+  在 CPU 上算即可。
+- iSTFT 走 CPU rustfft（12.5 帧/s，不值得写 GPU FFT）：Hermitian 补全 → 逆变换
+  带 1/N（norm="backward"）→ 乘 hann → 重叠相加 → 除以窗能量包络 → 两侧各去掉
+  pad=(win-hop)/2=1323 点。窗口直接用 checkpoint 里的
+  `audio.decoder.head.istft.window`。
+- 踩坑：np.save 对 F 连续的数组会写成 fortran_order=True，Rust 的 npy 读取器不支持；
+  金标导出时统一 `np.ascontiguousarray`。
+- 新增 `src/istft.rs` / `src/vae_dec.rs`，`Gpu` 改为 Clone（设备句柄可共享，
+  为 M5 单设备多阶段铺路）。
 
 **RNG 备注（M5 会用）**：prompt latent 与 CFM 噪声都走 torch.randn，
 对拍时由金标注入 eps（已存 m3_eps.npy）；要做到 bit-exact 需复刻 torch Philox，

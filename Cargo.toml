@@ -12,6 +12,7 @@ safetensors = "0.4"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"
+rustfft = "6"
 
 [profile.release]
 opt-level = 3

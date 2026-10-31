@@ -9,11 +9,13 @@ use clap::{Parser, Subcommand};
 
 mod dit;
 mod gpu;
+mod istft;
 mod nn;
 mod parity;
 mod qwen_lm;
 mod shaders;
 mod vae;
+mod vae_dec;
 mod weights;
 
 #[derive(Parser)]
