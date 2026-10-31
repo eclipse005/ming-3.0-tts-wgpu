@@ -162,9 +162,13 @@ impl LlmEngine {
     }
 
     fn rope_inplace(&self, q: &Buffer, n_heads: usize, tokens: usize, pos_base: usize) {
+        let mut u = [0u8; 16];
+        u[0..4].copy_from_slice(&(n_heads as u32).to_le_bytes());
+        u[4..8].copy_from_slice(&(pos_base as u32).to_le_bytes());
+        u[8..12].copy_from_slice(&0u32.to_le_bytes()); // split-half (Qwen2)
         self.k_rope.run(
             &self.gpu,
-            &uni2(n_heads as u32, pos_base as u32),
+            &u,
             &[&self.cos_buf, &self.sin_buf],
             q,
             tokens as u32,
@@ -173,14 +177,11 @@ impl LlmEngine {
     }
 
     fn kv_write(&self, src: &Buffer, cache: &Buffer, tokens: usize, pos_base: usize) {
-        self.k_kvwrite.run(
-            &self.gpu,
-            &uni1(pos_base as u32),
-            &[src],
-            cache,
-            tokens as u32,
-            1,
-        );
+        let mut u = [0u8; 16];
+        u[0..4].copy_from_slice(&(pos_base as u32).to_le_bytes());
+        u[4..8].copy_from_slice(&(KV_CAP as u32).to_le_bytes());
+        u[8..12].copy_from_slice(&(KV_HEADS as u32).to_le_bytes());
+        self.k_kvwrite.run(&self.gpu, &u, &[src], cache, tokens as u32, 1);
     }
 
     fn attend(
@@ -192,11 +193,14 @@ impl LlmEngine {
         q_pos_base: usize,
     ) -> Result<Buffer> {
         let y = self.gpu.storage((t * HIDDEN * 4) as u64, "attn.y");
-        let mut u = [0u8; 16];
+        let mut u = [0u8; 28];
         u[0..4].copy_from_slice(&(t as u32).to_le_bytes());
         u[4..8].copy_from_slice(&(q_pos_base as u32).to_le_bytes());
         u[8..12].copy_from_slice(&((Q_HEADS / KV_HEADS) as u32).to_le_bytes());
         u[12..16].copy_from_slice(&(1.0f32 / (HEAD_DIM as f32).sqrt()).to_le_bytes());
+        u[16..20].copy_from_slice(&0u32.to_le_bytes()); // full = 0 (causal)
+        u[20..24].copy_from_slice(&0u32.to_le_bytes()); // qpos_max unused
+        u[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes());
         self.k_attend.run(&self.gpu, &u, &[q, kc, vc], &y, Q_HEADS as u32, t as u32);
         Ok(y)
     }

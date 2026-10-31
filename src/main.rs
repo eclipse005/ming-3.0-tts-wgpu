@@ -7,6 +7,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod dit;
 mod gpu;
 mod nn;
 mod parity;

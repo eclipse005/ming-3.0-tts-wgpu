@@ -159,11 +159,12 @@ fn main(
 }
 "#;
 
-/// Qwen2 RoPE (rotate-half) applied in place to q or k for one token per
-/// workgroup. cos/sin tables are [512, 32] f32, precomputed on host.
+/// RoPE applied in place to q or k, one token per workgroup.
+/// interlected=0: Qwen2 rotate-half (pairs hd, hd+32); =1: x_transformers
+/// interleaved (pairs 2hd, 2hd+1). Angle tables [512, 32] f32 host-side.
 /// pos = pos_base + wg.x; dispatch (1, 1) for decode, (T, 1) for prefill.
 pub const ROPE: &str = r#"
-struct Params { n_heads: u32, pos_base: u32, }
+struct Params { n_heads: u32, pos_base: u32, interleaved: u32, }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> cos_t: array<f32>;  // [512, 32]
 @group(0) @binding(2) var<storage, read> sin_t: array<f32>;
@@ -175,16 +176,16 @@ fn main(
 ) {
     let token = wg.x;
     let pos = p.pos_base + token;
+    let c = cos_t[pos * 32u + (lid.x % 32u)];
+    let s = sin_t[pos * 32u + (lid.x % 32u)];
     var idx = lid.x;
     loop {
         if (idx >= p.n_heads * 32u) { break; }
         let head = idx / 32u;
         let hd = idx % 32u;
         let base = token * p.n_heads * 64u + head * 64u;
-        let d1 = base + hd;
-        let d2 = d1 + 32u;
-        let c = cos_t[pos * 32u + hd];
-        let s = sin_t[pos * 32u + hd];
+        let d1 = select(base + hd, base + hd * 2u, p.interleaved > 0u);
+        let d2 = select(d1 + 32u, d1 + 1u, p.interleaved > 0u);
         let x1 = q[d1];
         let x2 = q[d2];
         q[d1] = x1 * c - x2 * s;
@@ -203,6 +204,9 @@ struct Params {
     q_pos_base: u32,
     heads_per_kv: u32,
     scale: f32,
+    full: u32,         // 1 = bidirectional: every row attends 0..=qpos_max
+    qpos_max: u32,
+    stride: u32,       // q/y row stride in f32 (hidden size)
 }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> q: array<f32>;   // [T, 896]
@@ -221,8 +225,9 @@ fn main(
     let head = wg.x;
     let t = wg.y;
     let kvh = head / p.heads_per_kv;
-    let qpos = p.q_pos_base + t;
-    let qbase = t * 896u + head * 64u;
+    var qpos = p.q_pos_base + t;
+    if (p.full > 0u) { qpos = p.qpos_max; }
+    let qbase = t * p.stride + head * 64u;
     let kbase = kvh * 512u * 64u;
     let d = lid.x;
 
@@ -325,21 +330,76 @@ fn main(
 "#;
 
 /// Copy k or v for one token per workgroup into the head-major cache:
-/// cache[((h * 512) + pos) * 64 + d] = src[token * (n_kv*64) + h * 64 + d].
+/// cache[((h * cap) + pos) * 64 + d] = src[token * (n_kv*64) + h * 64 + d].
 pub const KV_WRITE: &str = r#"
-struct Params { pos_base: u32, }
+struct Params { pos_base: u32, cap: u32, n_kv: u32, }
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read> src: array<f32>;   // [T, 128]
-@group(0) @binding(2) var<storage, read_write> cache: array<f32>; // [2*512*64]
-@compute @workgroup_size(128)
+@group(0) @binding(1) var<storage, read> src: array<f32>;   // [T, n_kv*64]
+@group(0) @binding(2) var<storage, read_write> cache: array<f32>;
+@compute @workgroup_size(256)
 fn main(
     @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
     let token = wg.x;
     let pos = p.pos_base + token;
-    let h = lid.x / 64u;
-    let d = lid.x % 64u;
-    cache[(h * 512u + pos) * 64u + d] = src[token * 128u + lid.x];
+    var idx = lid.x;
+    let total = p.n_kv * 64u;
+    loop {
+        if (idx >= total) { break; }
+        let h = idx / 64u;
+        let d = idx % 64u;
+        cache[(h * p.cap + pos) * 64u + d] = src[token * total + idx];
+        idx = idx + 256u;
+    }
+}
+"#;
+
+/// Assemble a [3, W] seq from three [W] rows.
+pub const PACK3: &str = r#"
+struct Params { w: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0) @binding(2) var<storage, read> b: array<f32>;
+@group(0) @binding(3) var<storage, read> c: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>; // [3*W]
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let i = wg.x * 256u + lid.x;
+    if (i < p.w * 3u) {
+        let row = i / p.w;
+        let col = i % p.w;
+        let v = select(select(c[col], b[col], row == 1u), a[col], row == 0u);
+        y[i] = v;
+    }
+}
+"#;
+
+/// GELU with the exact erf form (A&S 7.1.26, |err| < 1.5e-7): 0.5x(1+erf(x/sqrt2)).
+pub const GELU_ERF: &str = r#"
+struct Params { n: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read_write> y: array<f32>;
+fn erf_approx(v: f32) -> f32 {
+    let ax = abs(v);
+    let t = 1.0 / (1.0 + 0.3275911 * ax);
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let e = 1.0 - poly * exp(-ax * ax);
+    return select(-e, e, v >= 0.0);
+}
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let i = wg.x * 256u + lid.x;
+    if (i < p.n) {
+        let v = x[i];
+        y[i] = 0.5 * v * (1.0 + erf_approx(v * 0.70710678));
+    }
 }
 "#;

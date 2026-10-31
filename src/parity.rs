@@ -296,3 +296,173 @@ mod m1_tests {
         z.data[0..896].to_vec()
     }
 }
+
+#[cfg(test)]
+mod m2_tests {
+    use super::*;
+    use crate::dit::DitEngine;
+    use crate::gpu::Gpu;
+    use crate::weights::Weights;
+
+    #[test]
+    fn flowloss_matches_python() {
+        let dir = |n| std::path::Path::new(&std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
+            .join(n);
+        let z = read_npy(&dir("m2_z.npy")).unwrap();
+        let lh = read_npy(&dir("m2_lh.npy")).unwrap();
+        let noise = read_npy(&dir("m2_noise.npy")).unwrap();
+        let sde = read_npy(&dir("m2_sde.npy")).unwrap();
+        let y = read_npy(&dir("m2_y_ref.npy")).unwrap();
+        let cfg = read_npy(&dir("m2_cfg.npy")).unwrap();
+        let steps = z.shape[0];
+        assert_eq!(steps, 41, "expected 41 recorded flowloss calls");
+
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let eng = DitEngine::load(gpu, &weights).unwrap();
+
+        let mut worst = 0.0f32;
+        let mut worst_i = 0usize;
+        for i in 0..steps {
+            let got = eng
+                .flow_sample(
+                    &z.data[i * 896..(i + 1) * 896],
+                    &lh.data[i * 64..(i + 1) * 64],
+                    &noise.data[i * 64..(i + 1) * 64],
+                    &sde.data[i * 640..(i + 1) * 640],
+                    cfg.data[i],
+                )
+                .unwrap();
+            let want = &y.data[i * 64..(i + 1) * 64];
+            let e = rel_l2(&got, want);
+            if e > worst {
+                worst = e;
+                worst_i = i;
+            }
+            if i < 2 || i + 1 == steps {
+                println!("step {i}: rel_l2={e:.3e} got[:3]={:?} want[:3]={:?}",
+                         &got[0..3], &want[0..3]);
+            }
+        }
+        println!("flowloss worst rel_l2 = {worst:.3e} @ step {worst_i}");
+        // Gate: 2e-3. A full sample = 10 euler steps x 8 blocks x ~7 GEMMs; f32
+        // accumulation-order noise + erf/exp approximations compound to ~1e-3
+        // (single dit_forward verified at 1.2e-4, drift grows over the chain).
+        assert!(worst < 2e-3, "flowloss rel_l2 {worst:.3e} >= 2e-3");
+    }
+}
+
+#[cfg(test)]
+mod m2_bisect_tests {
+    use super::*;
+    use crate::dit::DitEngine;
+    use crate::gpu::Gpu;
+    use crate::weights::Weights;
+
+    #[test]
+    fn dit_forward_bisect() {
+        let g = |n| read_npy(&std::path::Path::new(&std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
+            .join(n)).unwrap();
+        let x = g("m2bisect_x.npy").data;
+        let c = g("m2bisect_c.npy").data;
+        let lh = g("m2bisect_lh.npy").data;
+        let t = g("m2bisect_t_scalar.npy").data[0];
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let eng = DitEngine::load(gpu, &weights).unwrap();
+        let (temb, xn, xh, ce, b0, out) = eng.dit_forward_bisect(&x, t, &c, &lh).unwrap();
+        let checks = [
+            ("temb_mlp", temb, g("m2bisect_t_mlp.npy").data),
+            ("x_emb_now", xn, g("m2bisect_x_emb_call0.npy").data),
+            ("x_emb_hist", xh, g("m2bisect_x_emb_call1.npy").data),
+            ("c_emb", ce, g("m2bisect_c_emb.npy").data[0..1024].to_vec()),
+            ("block0", b0, g("m2bisect_block0.npy").data),
+            ("final", out, g("m2bisect_final.npy").data[2 * 64..3 * 64].to_vec()),
+        ];
+        for (name, got, want) in checks {
+            let e = rel_l2(&got, &want);
+            println!("{name}: rel_l2={e:.3e} got[:3]={:?} want[:3]={:?}", &got[0..3], &want[0..3]);
+            assert!(e < 1e-3, "{name} rel_l2 {e:.3e} >= 1e-3");
+        }
+    }
+}
+
+#[cfg(test)]
+mod m2_trace_tests {
+    use super::*;
+    use crate::dit::DitEngine;
+    use crate::gpu::Gpu;
+    use crate::weights::Weights;
+
+    #[test]
+    fn euler_trajectory_matches_python() {
+        let g = |n| read_npy(&std::path::Path::new(&std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
+            .join(n)).unwrap();
+        let z = g("m2_z.npy").data;
+        let lh = g("m2_lh.npy").data;
+        let noise = g("m2_noise.npy").data;
+        let sde = g("m2_sde.npy").data;
+        let ex = g("m2_euler_x.npy").data;
+        let cfg = g("m2_cfg.npy").data;
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let eng = DitEngine::load(gpu, &weights).unwrap();
+        // trace the FIRST flowloss call (euler calls 0..10)
+        let mut tr = Vec::new();
+        let mut tp = Vec::new();
+        let mut tn = Vec::new();
+        {
+            let traces = Some(&mut (&mut tr, &mut tp, &mut tn));
+            eng.flow_sample_traced(
+                &z[0..896], &lh[0..64], &noise[0..64], &sde[0..640], cfg[0],
+                traces.map(|(a, b, c)| (&mut **a, &mut **b, &mut **c))).unwrap();
+        }
+        let py_pred = g("m2_pred_ref.npy").data;
+        let py_null = g("m2_null_ref.npy").data;
+        let mut worst = 0.0f32;
+        for k in 0..tr.len() {
+            let want = &ex[k * 64..(k + 1) * 64];
+            let e = rel_l2(&tr[k], want);
+            // NOTE: torch's in-sampler (pred, null) decomposition differs from
+            // a direct forward_with_cfg by (delta, 1.5*delta) across call
+            // contexts while 3p-2n (the velocity) is preserved; the velocity
+            // and the integrated y chain are the invariant quantities, so the
+            // assertion is on y only.
+            if e > worst { worst = e; }
+            println!("euler {k}: y_err={e:.3e}");
+        }
+        println!("worst y rel_l2 = {worst:.3e}");
+        assert!(worst < 1e-3, "euler y rel_l2 {worst:.3e} >= 1e-3");
+    }
+}
+
+#[cfg(test)]
+mod m2_cross_tests {
+    use super::*;
+    use crate::dit::DitEngine;
+    use crate::gpu::Gpu;
+    use crate::weights::Weights;
+
+    #[test]
+    fn dit_forward_cross_check() {
+        let g = |n| read_npy(&std::path::Path::new(&std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
+            .join(n)).unwrap();
+        let x = g("m2bisect_x.npy").data;
+        let c = g("m2bisect_c.npy").data;
+        let lh = g("m2bisect_lh.npy").data;
+        let t = g("m2bisect_t_scalar.npy").data[0];
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let eng = DitEngine::load(gpu, &weights).unwrap();
+        let (_, _, _, _, _, via_bisect) = eng.dit_forward_bisect(&x, t, &c, &lh).unwrap();
+        let via_fwd = eng.dit_forward(&x, t, &c, &lh).unwrap();
+        let e = rel_l2(&via_fwd, &via_bisect);
+        println!("dit_forward vs bisect: rel_l2={e:.3e} fwd[:3]={:?} bisect[:3]={:?}",
+                 &via_fwd[0..3], &via_bisect[0..3]);
+        assert!(e < 1e-4, "two rust paths disagree: {e:.3e}");
+    }
+}

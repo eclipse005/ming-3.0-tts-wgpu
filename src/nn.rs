@@ -102,6 +102,38 @@ pub fn rmsnorm(gpu: &Gpu, x: &[f32], w: &[f32], n: usize, eps: f32) -> Result<Ve
     gpu.read_f32(&y_buf, rows * n)
 }
 
+/// gemv with already-resident weight/bias buffers (no re-upload per call).
+pub fn gemv_bf16w_buf(
+    gpu: &Gpu,
+    w_buf: &Buffer,
+    b_buf: &Buffer,
+    x: &[f32],
+    rows: usize,
+    in_features: usize,
+) -> Result<Vec<f32>> {
+    let in_words = in_features / 2;
+    let x_buf = gpu.upload_f32(x, "x");
+    let y_buf = gpu.storage((rows * 4) as u64, "y");
+    let mut u = [0u8; 16];
+    u[0..4].copy_from_slice(&(rows as u32).to_le_bytes());
+    u[4..8].copy_from_slice(&(in_words as u32).to_le_bytes());
+    let u_buf = uniform(gpu, &u);
+    let (bgl, pipeline) = make_pipeline(gpu, shaders::GEMV_BF16W, 3);
+    let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: u_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: b_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: y_buf.as_entire_binding() },
+        ],
+    });
+    gpu.run(&pipeline, &bind, ((rows + 7) / 8) as u32);
+    gpu.read_f32(&y_buf, rows)
+}
+
 /// y = W @ x + b, W bf16 [rows, in] packed 2/u32; pass zeros for no bias.
 pub fn gemv_bf16w(
     gpu: &Gpu,

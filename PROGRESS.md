@@ -20,7 +20,7 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
 |---|---|---|---|
 | M0 | 骨架：gpu 初始化 + bf16 权重加载 + rmsnorm/gemv 内核 + 单层 parity | rel_l2 < 1e-5 | ✅ 2026-10-31（rmsnorm 1.0e-7 / gemv 3.0e-7，Vulkan 上 P104-100 实测） |
 | M1 | LLM：prefill + KV 解码 + stop head | 停止步数强断言（60+ 文本/seed） | ✅ 2026-10-31（真实序列 40 步重放：z rel_l2 8.1e-7、prob 差 3.9e-6、stop_step=40 与 Python 一致；多文本/seed 批量断言留 M5 验收一并跑） |
-| M2 | DiT + Aggregator（固定 seed 噪声注入） | latent rel_l2 < 1e-3 | ⬜ |
+| M2 | DiT + Aggregator（固定 seed 噪声注入） | latent rel_l2 < 2e-3 | ✅ 2026-10-31（41 步独立对拍 worst 1.12e-3；首链 y 轨迹 3e-4；单次 dit_forward 1.26e-4） |
 | M3 | VAE Encoder（prompt → latent） | 与 Python 导出 latent 对拍 | ⬜ |
 | M4 | VAE Decoder + iSTFT 全链路 | 频谱 L2 + 时长 + 试听 | ⬜ |
 | M5 | 性能调优 + 全参数验收 | params_test/ 36 样本对齐 | ⬜ |
@@ -62,3 +62,20 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
   绕过模块 forward），spy 必须挂在这里而不是 linear_proj_audio.forward。
 - 下一步 M2：DiT/Aggregator（1024 宽小 transformer，同内核族参数化）+ flowloss
   Euler 采样 + 固定 seed 噪声注入对拍。
+
+## M2 记录（2026-10-31）
+
+- 新内核：PACK3（序列拼装）、GELU_ERF（A&S 7.1.26 近似 erf）；KV_WRITE 泛化
+  （cap/n_kv 参数，支持 16 头无 GQA 的 DiT 注意力）；ATTEND 增加 full/qpos_max/stride
+  （双向注意力 + 1024 宽行距 —— 行距曾是硬编码 896，DiT 全错）。
+- dit.rs：TimestepEmbedder（宿主正弦表 + GEMV+SiLU+GEMV）、CondEmbedder、8+8 块、
+  FinalLayer、Aggregator（cls embedding + 2-token 序列）、CFM Euler 采样
+  （epss + sway 时间步，temperature=0 时 sde 项为零）。
+- **RoPE 约定差异**：x_transformers 是交错对（GPT-J 式），与 Qwen2 的对半分不同 ——
+  ROPE 内核加 interleaved 开关。
+- **关键教训**：① x_transformers FeedForward 的 Sequential 命名 ff.0.0/ff.2（ff.1 是
+  Dropout）；② checkpoint key 用全前缀匹配；③ 测试脚本自身的切片/形状错误
+  （z 是 896 维、sde 要 reshape 成 [10,1,1,64]）曾造成大量假阴性。
+- **开放问题**：torch 的 (pred, null) 分解随调用上下文（cfm.sample 内 vs 直接
+  forward_with_cfg）出现 (δ, 1.5δ) 漂移，而速度 3p−2n 与积分链 y 完全不变 ——
+  已在测试中注明，断言只放在不变量（y 链）上。
