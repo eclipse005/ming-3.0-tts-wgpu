@@ -18,6 +18,7 @@ mod ops;
 mod parity;
 mod pipeline;
 mod qwen_lm;
+mod rng;
 mod shaders;
 mod synth;
 mod spk;

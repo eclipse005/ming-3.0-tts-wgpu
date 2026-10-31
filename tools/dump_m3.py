@@ -70,7 +70,8 @@ def enc_spy(waveform, waveform_length):
         h2 = o.transpose(1, 2)
         mean, logvar = torch.chunk(h2, 2, dim=1)
         cap["mean"] = mean[0].detach().float().cpu().numpy().T
-        cap["std"] = torch.exp(0.5 * logvar)[0].detach().float().cpu().numpy().T
+        # diffusers Oobleck posterior: std = softplus(scale) + 1e-4
+        cap["std"] = (torch.nn.functional.softplus(logvar) + 1e-4)[0].detach().float().cpu().numpy().T
     return latent, frame_num
 
 m.audio.encode_latent = enc_spy

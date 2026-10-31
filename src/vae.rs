@@ -290,13 +290,18 @@ impl VaeEncoder {
         let out = self.mrow(&self.fc3, &cr, p_count)?;
         let flat = self.gpu.read_f32(&out, p_count * 128)?;
         out_vec.push(("fc3_out".into(), flat.clone()));
+        // diffusers OobleckDiagonalGaussianDistribution: mean = chunk 0,
+        // std = softplus(chunk 1) + 1e-4 -- NOT exp(0.5 * logvar).
+        // PyTorch softplus switches to the identity above threshold = 20.
         let mut mean = vec![0f32; p_count * 64];
         let mut std = vec![0f32; p_count * 64];
         for i in 0..p_count * 64 {
             let row = i / 64;
             let ch = i % 64;
             mean[i] = flat[row * 128 + ch];
-            std[i] = (flat[row * 128 + 64 + ch] * 0.5).exp();
+            let scale = flat[row * 128 + 64 + ch];
+            let sp = if scale > 20.0 { scale } else { (scale.exp() + 1.0).ln() };
+            std[i] = sp + 1e-4;
         }
         out_vec.push(("mean".into(), mean.clone()));
         out_vec.push(("std".into(), std.clone()));

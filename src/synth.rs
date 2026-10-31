@@ -2,7 +2,7 @@
 //! invocation, same flag surface (see main.rs).
 
 use crate::audio;
-use crate::pipeline::{Pipeline, SynthParams, Xoshiro};
+use crate::pipeline::{Pipeline, SynthParams};
 use crate::spk;
 use crate::tasks;
 use crate::text;
@@ -151,7 +151,7 @@ pub fn run(a: Args) -> Result<()> {
             println!("noise: {} golden draws from {dir}", draws.len());
             Box::new(crate::pipeline::GoldenNoise::new(draws))
         }
-        Err(_) => Box::new(Xoshiro::new(a.seed as u64)),
+        Err(_) => Box::new(crate::pipeline::Torch::new(a.seed)),
     };
 
     // ---- voice conditioning ------------------------------------------------
@@ -176,27 +176,29 @@ pub fn run(a: Args) -> Result<()> {
     let mut pl = Pipeline::load(model_dir, needs_encoder)?;
 
     if !a.prompt_wav_path.is_empty() {
-        // concatenate every prompt wav along time, then pad-align at the front
-        let mut all: Vec<f32> = Vec::new();
-        let mut rate = 0u32;
+        // The reference resamples each prompt wav once, from its NATIVE rate:
+        // one branch goes to 16 kHz for the speaker embedding, the other to the
+        // VAE's 44.1 kHz. Chaining 48k -> 44.1k -> 16k is a different filter and
+        // measurably changes the embedding.
+        let mut at_44k: Vec<f32> = Vec::new();
+        let mut for_spk: Vec<f32> = Vec::new();
         for p in &a.prompt_wav_path {
             let (x, r) = audio::read_wav(p).with_context(|| format!("read prompt {p}"))?;
-            rate = r;
-            let x = if r != 44100 { audio::resample(&x, r, 44100) } else { x };
-            all.extend_from_slice(&x);
+            if a.use_spk_emb {
+                for_spk.extend_from_slice(&if r != 16000 {
+                    audio::resample(&x, r, 16000)
+                } else {
+                    x.clone()
+                });
+            }
+            at_44k.extend_from_slice(&if r != 44100 { audio::resample(&x, r, 44100) } else { x });
         }
-        let _ = rate;
+        let mut all = at_44k;
 
         if a.use_spk_emb && spk_emb.is_none() {
-            let spk16 = if rate != 16000 {
-                audio::resample(&all, 44100, 16000)
-            } else {
-                all.clone()
-            };
             let onnx = model_dir.join("campplus.onnx");
             spk_emb = Some(
-                spk::embed_16k_with(&onnx, &spk16)
-                    .context("campplus speaker embedding")?,
+                spk::embed_16k_with(&onnx, &for_spk).context("campplus speaker embedding")?,
             );
         }
 
@@ -211,16 +213,17 @@ pub fn run(a: Args) -> Result<()> {
             }
             let enc = pl.enc.as_ref().expect("encoder loaded");
             let (mean, std, n_patch) = enc.encode_params(&all)?;
-            // posterior.sample(): one normal draw per (latent, frame), drawn
-            // before any decode step, exactly like the reference's RNG order.
-            let need = mean.len();
-            let mut eps: Vec<f32> = Vec::with_capacity(need + 64);
-            while eps.len() < need {
-                eps.extend_from_slice(&rng.noise());
-            }
-            let mut latent = vec![0f32; need];
-            for i in 0..need {
-                latent[i] = mean[i] + std[i] * eps[i];
+            // posterior.sample(): torch draws one tensor of shape [1, 64, T], so
+            // the flat stream is (channel, frame) ordered while our mean/std are
+            // (frame, channel); transpose to line the samples up.
+            let frames = mean.len() / 64;
+            let raw = rng.draw(64 * frames);
+            let mut latent = vec![0f32; mean.len()];
+            for t in 0..frames {
+                for c in 0..64 {
+                    let i = t * 64 + c;
+                    latent[i] = mean[i] + std[i] * raw[c * frames + t];
+                }
             }
             prompt_latent = Some((latent, n_patch));
         }
@@ -280,6 +283,18 @@ pub fn run(a: Args) -> Result<()> {
                 prompt_latent_steps: latent_steps,
             },
         )?;
+        // MING_DUMP_IDS=<file> writes the token ids and input embeddings of the
+        // first fragment, for diffing the CLI against the reference pipeline.
+        if let Ok(path) = std::env::var("MING_DUMP_IDS") {
+            let ids: String = layout
+                .input_ids
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            std::fs::write(&path, ids)?;
+            println!("ids -> {path} ({} tokens)", layout.input_ids.len());
+        }
         let mut embeds = pl.embed_ids(&layout.input_ids)?;
         if let Some(se) = &spk_row {
             let pos = layout.speaker_positions[0];
@@ -323,5 +338,3 @@ pub fn run(a: Args) -> Result<()> {
     );
     Ok(())
 }
-
-

@@ -22,97 +22,57 @@ pub const HISTORY: usize = 1;
 pub const MAX_CACHE_LEN: usize = 512;
 pub const CFM_STEPS: usize = 10;
 
-/// Where the two per-step torch.randn draws come from.
+/// Noise source for the sampler. One method call models one `torch.randn`
+/// call, because the reference's generator advances its draw counter per call
+/// (see rng.rs) -- splitting a draw into two halves would desynchronise it.
 pub trait Noise {
-    /// (patch, latent) noise for the sampler start.
-    fn noise(&mut self) -> Vec<f32>;
-    /// (steps, patch, latent) SDE noise.
-    fn sde(&mut self) -> Vec<f32>;
+    fn draw(&mut self, n: usize) -> Vec<f32>;
 }
 
-/// Records the draws so a parity run can assert on them.
+/// Replays recorded torch.randn draws (MING_NOISE_GOLDEN / parity runs).
 pub struct GoldenNoise {
-    pub draws: Vec<Vec<f32>>,
-    pub cursor: usize,
+    draws: Vec<Vec<f32>>,
+    cursor: usize,
 }
 
 impl GoldenNoise {
     pub fn new(draws: Vec<Vec<f32>>) -> Self {
         Self { draws, cursor: 0 }
     }
-    fn take(&mut self) -> Vec<f32> {
-        let d = self.draws.get(self.cursor).cloned().unwrap_or_default();
-        self.cursor += 1;
-        d
-    }
 }
 
 impl Noise for GoldenNoise {
-    fn noise(&mut self) -> Vec<f32> {
-        self.take()
-    }
-    fn sde(&mut self) -> Vec<f32> {
-        self.take()
-    }
-}
-
-/// xoshiro256** + Box-Muller, the native (non-torch) RNG.
-pub struct Xoshiro {
-    s: [u64; 4],
-    spare: Option<f32>,
-}
-
-impl Xoshiro {
-    pub fn new(seed: u64) -> Self {
-        // splitmix64 expansion so any seed works, including 0
-        let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
-        let mut next = || {
-            z = z.wrapping_add(0x9E3779B97F4A7C15);
-            let mut x = z;
-            x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
-            x ^ (x >> 31)
-        };
-        Self { s: [next(), next(), next(), next()], spare: None }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let r = self.s[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
-        let t = self.s[1] << 17;
-        self.s[2] ^= self.s[0];
-        self.s[3] ^= self.s[1];
-        self.s[1] ^= self.s[2];
-        self.s[0] ^= self.s[3];
-        self.s[2] ^= t;
-        self.s[3] = self.s[3].rotate_left(45);
-        r
-    }
-
-    fn uniform(&mut self) -> f32 {
-        // (0, 1] like curand_uniform
-        let u = (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32;
-        if u == 0.0 { f32::EPSILON } else { u }
-    }
-
-    fn normal(&mut self) -> f32 {
-        if let Some(v) = self.spare.take() {
-            return v;
+    fn draw(&mut self, n: usize) -> Vec<f32> {
+        match self.draws.get(self.cursor) {
+            Some(d) => {
+                assert_eq!(
+                    d.len(),
+                    n,
+                    "golden draw {} has {} values, the pipeline asked for {n}: \
+                     the runs diverged before this point",
+                    self.cursor,
+                    d.len()
+                );
+                self.cursor += 1;
+                d.clone()
+            }
+            None => panic!("ran out of golden draws at draw {} (wanted {n} values)", self.cursor),
         }
-        let u1 = self.uniform();
-        let u2 = self.uniform();
-        let r = (-2.0 * u1.ln()).sqrt();
-        let th = std::f32::consts::TAU * u2;
-        self.spare = Some(r * th.sin());
-        r * th.cos()
     }
 }
 
-impl Noise for Xoshiro {
-    fn noise(&mut self) -> Vec<f32> {
-        (0..PATCH * LATENT_DIM).map(|_| self.normal()).collect()
+/// Production source: the reference's own generator (rng::Philox).
+pub struct Torch { inner: crate::rng::Philox }
+
+impl Torch {
+    pub fn new(seed: i64) -> Self {
+        Self { inner: crate::rng::Philox::new(seed) }
     }
-    fn sde(&mut self) -> Vec<f32> {
-        (0..CFM_STEPS * PATCH * LATENT_DIM).map(|_| self.normal()).collect()
+}
+
+impl Noise for Torch {
+    fn draw(&mut self, n: usize) -> Vec<f32> {
+        self.inner.draw(n)
     }
 }
 
@@ -246,8 +206,9 @@ impl Pipeline {
         let mut pos = t;
 
         for step in 0..steps {
-            let nz = noise.noise();
-            let sde = noise.sde();
+            // The reference draws both up front, in this order, at every step.
+            let nz = noise.draw(PATCH * LATENT_DIM);
+            let sde = noise.draw(CFM_STEPS * PATCH * LATENT_DIM);
             let t_d = std::time::Instant::now();
             let lat = self.dit.flow_sample_stoch(
                 &z, &history, &nz, &sde, p.cfg, p.sigma, p.temperature)?;
