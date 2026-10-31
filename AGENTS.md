@@ -9,7 +9,7 @@
 ```bat
 cd D:\Ming-3.0-tts\wgpu
 cargo build --release
-cargo test --release -- --test-threads=1        :: 54 个测试，约 110 s，需要 GPU
+cargo test --release -- --test-threads=1        :: 56 个测试，约 170 s，需要 GPU
 ```
 
 单条合成（参数面与 Python 的 `infer.py` 逐字一致）：
@@ -33,9 +33,11 @@ target\release\ming-tts-wgpu.exe synth ^
    已用 28160 个值验证到 1.4e-6。
 3. **激活保持 f32，权重保持 bf16 原样上传。** 不要引入 f16：LLM 残差流平台在 7.4e4，
    超出 f16 上限（这不是猜测，PROGRESS.md 决策记录里有逐层实测）。
-4. **模型几何来自 checkpoint，不要硬编码猜测**：DiT 的注意力是双向、rope θ=1e4 且**交错**；
-   LLM/VAE 是 Qwen2 rotate-half θ=1e6；VAE 编码/解码有**滑窗 64**。搞错任何一个，
-   parity 会以 1e-1 量级失败。
+4. **模型几何来自 checkpoint，不要硬编码猜测**：DiT 的注意力是双向、rope **交错**
+   且频率**直接读 checkpoint 的 `rotary_embed.inv_freq`**（它不是 θ=1e4 的解析式，
+   两者差 1.4e-4，足以把每步误差从 1e-7 抬到 1e-4 —— 见 PROGRESS 坑清单 13）；
+   LLM/VAE 是 Qwen2 rotate-half θ=1e6；VAE 编码/解码有**滑窗 64**。
+   搞错任何一个，parity 会以 1e-1 量级失败。
 5. **Python 主仓 `D:\Ming-3.0-tts` 是只读参考**，不要改它。
 6. **单次改动后必须跑 `cargo test --release`**；碰到音频相关的改动再跑
    `python tools/check_params_align.py`（需要 videolingo 的 conda 环境）。
@@ -46,7 +48,7 @@ target\release\ming-tts-wgpu.exe synth ^
 - 音频：`tools/check_params_align.py` 会逐例打印 时长比 / rel_l2 / log-mel 相关 /
   音色余弦；判定标准见 PROGRESS.md 第 4.2 节。
 - **不要追求逐采样点一致**：解码环是混沌的，1e-7 的输入扰动会被放大 1e5 倍
-  （PROGRESS.md 4.4 已量化）。目标是每步 ~1e-4 数值一致 + 停止判据一致 + 听感一致。
+  （PROGRESS.md 4.4 已量化）。目标是每步 ~1e-6 数值一致 + 停止判据一致 + 听感一致。
 
 ## 当前唯一的未完成项
 

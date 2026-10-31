@@ -27,6 +27,13 @@ TASK_CN = {"TTS": "裸/克隆", "BASIC": "语速音高音量", "EMOTION": "情�
            "STYLE": "声音设计", "FREEFORM": "自由指令"}
 
 os.makedirs(OUT, exist_ok=True)
+
+
+def to_pcm16(src, dst):
+    x, sr = sf.read(src, dtype="float32")
+    sf.write(dst, x, sr, subtype="PCM_16")
+
+
 rows = []
 for i, (name, task, text, kwargs) in enumerate(SPEC, 1):
     ref_src = NOCACHE + "/" + name + ".wav" if name in CACHE else REF + "/" + name + ".wav"
@@ -36,8 +43,11 @@ for i, (name, task, text, kwargs) in enumerate(SPEC, 1):
         continue
     ref_dst = os.path.join(OUT, "%02d_%s__ref.wav" % (i, name))
     rust_dst = os.path.join(OUT, "%02d_%s__rust.wav" % (i, name))
-    shutil.copyfile(ref_src, ref_dst)
-    shutil.copyfile(rust_src, rust_dst)
+    # Browsers refuse WAVE_FORMAT_IEEE_FLOAT (which is what torchaudio/our
+    # writer produce), so the page gets 16-bit PCM copies. Scoring still runs
+    # on the original float files.
+    to_pcm16(ref_src, ref_dst)
+    to_pcm16(rust_src, rust_dst)
     m = compare(ref_src, rust_src)
     rows.append(dict(idx=i, name=name, task=task, cache=name in CACHE,
                      ref=os.path.basename(ref_dst), rust=os.path.basename(rust_dst), **m))

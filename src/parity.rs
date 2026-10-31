@@ -262,10 +262,14 @@ mod m2_tests {
             }
         }
         println!("flowloss worst rel_l2 = {worst:.3e} @ step {worst_i}");
-        // Gate: 2e-3. A full sample = 10 euler steps x 8 blocks x ~7 GEMMs; f32
-        // accumulation-order noise + erf/exp approximations compound to ~1e-3
-        // (single dit_forward verified at 1.2e-4, drift grows over the chain).
-        assert!(worst < 2e-3, "flowloss rel_l2 {worst:.3e} >= 2e-3");
+        // Gate: 1e-5, i.e. ~10x the measured 9.6e-7.
+        //
+        // This gate used to be 2e-3 because the DiT's rope was built from a
+        // guessed base (theta=1e4) instead of the checkpoint's inv_freq buffer;
+        // that alone put 1.28e-4 of systematic error into every 41-step sample.
+        // With the real frequencies the whole sampler sits at the f32 floor, so
+        // a regression here now means a formula changed, not ulp drift.
+        assert!(worst < 1e-5, "flowloss rel_l2 {worst:.3e} >= 1e-5");
     }
 }
 
@@ -300,7 +304,7 @@ mod m2_bisect_tests {
         for (name, got, want) in checks {
             let e = rel_l2(&got, &want);
             println!("{name}: rel_l2={e:.3e} got[:3]={:?} want[:3]={:?}", &got[0..3], &want[0..3]);
-            assert!(e < 1e-3, "{name} rel_l2 {e:.3e} >= 1e-3");
+            assert!(e < 1e-5, "{name} rel_l2 {e:.3e} >= 1e-5");
         }
     }
 }
@@ -351,7 +355,7 @@ mod m2_trace_tests {
             println!("euler {k}: y_err={e:.3e}");
         }
         println!("worst y rel_l2 = {worst:.3e}");
-        assert!(worst < 1e-3, "euler y rel_l2 {worst:.3e} >= 1e-3");
+        assert!(worst < 1e-5, "euler y rel_l2 {worst:.3e} >= 1e-5");
     }
 }
 

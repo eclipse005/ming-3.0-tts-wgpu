@@ -16,6 +16,8 @@ mod nn;
 mod ops;
 #[cfg(test)]
 mod parity;
+#[cfg(test)]
+mod parity_m5;
 mod pipeline;
 mod qwen_lm;
 mod rng;

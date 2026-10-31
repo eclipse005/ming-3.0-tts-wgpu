@@ -6,7 +6,7 @@ use crate::gpu::Gpu;
 use crate::nn::gemv_bf16w_buf;
 use crate::ops::{AttendParams, Lin, Ops, RopeTables};
 use crate::weights::Weights;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::sync::Arc;
 use wgpu::Buffer;
 
@@ -105,8 +105,23 @@ impl DitEngine {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        // rope base 10000 for the 1024-wide blocks (x_transformers default)
-        let rope = RopeTables::new(&gpu, 10_000.0, 64, 512);
+        // The 1024-wide blocks rotate with the checkpoint's own inv_freq buffer,
+        // not with theta=1e4. x_transformers registers inv_freq as a buffer, so
+        // the trained model carries it, and it is NOT `1e4 ** (-2i/64)`: the two
+        // differ by ~1.4e-4 relative (the stored one is a bf16-rounded schedule
+        // whose ratio to 1e4 drifts per index). Feeding the wrong base is the
+        // single largest error source inside a DiT block: q is exact to 1.8e-7
+        // before rope and 8.1e-5 after it, which then shows up as 1.1e-4 in
+        // attention and 2.3e-5 at the block output. Same buffer serves the
+        // aggregator (the checkpoint's two inv_freq tensors are identical).
+        let inv_freq = p("flowloss.cfm.model.rotary_embed.inv_freq")?.to_f32()?;
+        if inv_freq.len() * 2 != 64 {
+            bail!(
+                "DiT rotary inv_freq has {} entries, expected 32 (head_dim 64)",
+                inv_freq.len()
+            );
+        }
+        let rope = RopeTables::from_inv_freq(&gpu, &inv_freq, 512);
         Ok(Self {
             t_mlp1: lin("flowloss.cfm.model.t_embedder.time_mlp.0", XH, 256)?,
             t_mlp2: lin("flowloss.cfm.model.t_embedder.time_mlp.2", XH, XH)?,
@@ -160,7 +175,7 @@ impl DitEngine {
             let q = self.mrow(&b.q, &a, t)?;
             let k = self.mrow(&b.k, &a, t)?;
             let v = self.mrow(&b.v, &a, t)?;
-            // rope: 16 heads, positions 0..t, base-10000, interleaved
+            // rope: 16 heads, positions 0..t, checkpoint inv_freq, interleaved
             self.ops.rope(&self.rope, &q, XHEADS, 1, 0, t);
             self.ops.rope(&self.rope, &k, XHEADS, 1, 0, t);
             // stage k/v into the shared cache layout and attend bidirectionally
@@ -235,6 +250,67 @@ impl DitEngine {
         self.gpu.read_f32_offset(&out, ZC, (2 * ZC * 4) as u64)
     }
 
+    /// Diagnostic: every sub-operator of block 0, for bisecting where the error
+    /// inside one DiT block comes from (see tools/dump_dit_block0.py).
+    #[cfg(test)]
+    pub fn block0_parts(
+        &self,
+        x: &[f32],
+        t: f32,
+        c: &[f32],
+        lh: &[f32],
+    ) -> Result<Vec<(String, Vec<f32>)>> {
+        let xb = self.gpu.upload_f32(x, "b0.x");
+        let cb = self.gpu.upload_f32(c, "b0.c");
+        let lhb = self.gpu.upload_f32(lh, "b0.lh");
+        let temb = self.gpu.upload_f32(&Self::timestep_embedding(t), "b0.temb");
+        let tm1 = self.mrow(&self.t_mlp1, &temb, 1)?;
+        let sil = self.silu_mul(&tm1, &self.ones_1024, XH);
+        let tm2 = self.mrow(&self.t_mlp2, &sil, 1)?;
+        let xn = self.mrow(&self.x_emb, &xb, 1)?;
+        let xh = self.mrow(&self.x_emb, &lhb, 1)?;
+        let ce = self.mrow(&self.c_emb, &cb, 1)?;
+        let y = self.add(&tm2, &ce, XH);
+        let seq = self.ops.pack3(&y, &xh, &xn, XH, 3);
+
+        let b = &self.blocks[0];
+        let mut out: Vec<(String, Vec<f32>)> = Vec::new();
+        let a = self.rms(&seq, &b.n1, 3);
+        let q = self.mrow(&b.q, &a, 3)?;
+        let k = self.mrow(&b.k, &a, 3)?;
+        let v = self.mrow(&b.v, &a, 3)?;
+        out.push(("norm1".into(), self.gpu.read_f32(&a, 3 * XH)?));
+        out.push(("q".into(), self.gpu.read_f32(&q, 3 * XH)?));
+        out.push(("k".into(), self.gpu.read_f32(&k, 3 * XH)?));
+        out.push(("v".into(), self.gpu.read_f32(&v, 3 * XH)?));
+        self.ops.rope(&self.rope, &q, XHEADS, 1, 0, 3);
+        self.ops.rope(&self.rope, &k, XHEADS, 1, 0, 3);
+        out.push(("q_rope".into(), self.gpu.read_f32(&q, 3 * XH)?));
+        out.push(("k_rope".into(), self.gpu.read_f32(&k, 3 * XH)?));
+        self.ops.kv_write(&k, &self.kv_k, 3, 0, DIT_KV_CAP, XHEADS);
+        self.ops.kv_write(&v, &self.kv_v, 3, 0, DIT_KV_CAP, XHEADS);
+        let attn = self.ops.attend(
+            &AttendParams::full(3, 64, XH, DIT_KV_CAP),
+            &q,
+            &self.kv_k,
+            &self.kv_v,
+            XHEADS,
+        );
+        let o = self.mrow(&b.o, &attn, 3)?;
+        let h = self.add(&seq, &o, 3 * XH);
+        out.push(("attn".into(), self.gpu.read_f32(&o, 3 * XH)?));
+        let a2 = self.rms(&h, &b.n2, 3);
+        out.push(("norm2".into(), self.gpu.read_f32(&a2, 3 * XH)?));
+        let fi = self.mrow(&b.ff_in, &a2, 3)?;
+        out.push(("ff_pre".into(), self.gpu.read_f32(&fi, 3 * XFF)?));
+        let g = self.gelu(&fi, 3 * XFF);
+        out.push(("gelu".into(), self.gpu.read_f32(&g, 3 * XFF)?));
+        let fo = self.mrow(&b.ff_out, &g, 3)?;
+        out.push(("ff_out".into(), self.gpu.read_f32(&fo, 3 * XH)?));
+        let bout = self.add(&h, &fo, 3 * XH);
+        out.push(("out".into(), self.gpu.read_f32(&bout, 3 * XH)?));
+        Ok(out)
+    }
     /// Aggregator: latent [64] -> projected llm cond [896].
     pub fn agg_forward(&self, latent: &[f32]) -> Result<Vec<f32>> {
         let xb = self.gpu.upload_f32(latent, "agg.latent");

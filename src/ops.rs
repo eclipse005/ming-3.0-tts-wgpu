@@ -86,13 +86,31 @@ pub struct RopeTables {
 }
 
 impl RopeTables {
+    /// Tables from the usual `theta ** (-2i / head_dim)` schedule.
+    ///
+    /// Only correct when the reference really uses that formula. The DiT does
+    /// NOT: its checkpoint carries the inv_freq buffer the model was trained
+    /// with, and that buffer is not `1e4 ** (-2i/64)` (it differs by ~1.4e-4
+    /// relative, which is 450x the f32 noise on q after one rope). Anything
+    /// whose module state_dict has an `inv_freq` tensor must go through
+    /// [`RopeTables::from_inv_freq`] instead of guessing a base.
     pub fn new(gpu: &Gpu, theta: f64, head_dim: usize, cap: usize) -> Self {
-        let half = head_dim / 2;
+        let inv_freq: Vec<f32> = (0..head_dim / 2)
+            .map(|i| theta.powf((2 * i) as f64 / head_dim as f64).recip() as f32)
+            .collect();
+        Self::from_inv_freq(gpu, &inv_freq, cap)
+    }
+
+    /// Tables straight from a checkpoint `inv_freq` buffer (`theta ** (-2i/d)`
+    /// for a plain schedule, but stored per-model, in the model's own dtype).
+    /// Angles are accumulated in f64 and only the cos/sin pairs are rounded to
+    /// f32, which is what the reference does before its rope multiply.
+    pub fn from_inv_freq(gpu: &Gpu, inv_freq: &[f32], cap: usize) -> Self {
+        let half = inv_freq.len();
         let (mut cos, mut sin) = (vec![0f32; cap * half], vec![0f32; cap * half]);
         for pos in 0..cap {
-            for i in 0..half {
-                let freq = theta.powf((2 * i) as f64 / head_dim as f64).recip();
-                let ang = pos as f64 * freq;
+            for (i, &f) in inv_freq.iter().enumerate() {
+                let ang = pos as f64 * f as f64;
                 cos[pos * half + i] = ang.cos() as f32;
                 sin[pos * half + i] = ang.sin() as f32;
             }
