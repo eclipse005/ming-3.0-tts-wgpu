@@ -18,12 +18,21 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
 
 | 阶段 | 内容 | parity 断言 | 状态 |
 |---|---|---|---|
-| M0 | 骨架：gpu 初始化 + bf16 权重加载 + rmsnorm/gemv 内核 + 单层 parity | rel_l2 < 1e-5 | 🔨 进行中 |
-| M1 | LLM：prefill + KV 解码 + stop head | 停止步数强断言（60+ 文本/seed） | ⬜ |
+| M0 | 骨架：gpu 初始化 + bf16 权重加载 + rmsnorm/gemv 内核 + 单层 parity | rel_l2 < 1e-5 | ✅ 2026-10-31（rmsnorm 1.0e-7 / gemv 3.0e-7，Vulkan 上 P104-100 实测） |
+| M1 | LLM：prefill + KV 解码 + stop head | 停止步数强断言（60+ 文本/seed） | ⬜ 下一步 |
 | M2 | DiT + Aggregator（固定 seed 噪声注入） | latent rel_l2 < 1e-3 | ⬜ |
 | M3 | VAE Encoder（prompt → latent） | 与 Python 导出 latent 对拍 | ⬜ |
 | M4 | VAE Decoder + iSTFT 全链路 | 频谱 L2 + 时长 + 试听 | ⬜ |
 | M5 | 性能调优 + 全参数验收 | params_test/ 36 样本对齐 | ⬜ |
+
+## M0 记录（2026-10-31）
+
+- `cargo build`/`test` 全绿；`ming-tts-wgpu.exe devices` 列出 [Vulkan] P104-100。
+- golden dump：真实 clone-demo 输入（lingguang + A3 文本），T=109，h3 激活含 7.63e3 尖峰。
+- 内核：`RMSNORM`（256 lane 行归约）、`GEMV_BF16W`（warp/行 + bf16 解包 f32 累加 + bias）。
+- **教训**：① 本 checkpoint 的 q/k/v 投影带 bias（absmax ~17），gemv 必须融合 bias；
+  ② checkpoint key 有 `audio.encoder/decoder` 前缀的同名层，匹配要用 `model.model.layers.*` 全前缀；
+  ③ bf16 1.0 LE = `[0x80,0x3F]`（测试数据写错过一次）。
 
 ## 决策记录
 
