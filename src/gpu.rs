@@ -109,6 +109,10 @@ impl Gpu {
     }
 
     pub fn read_f32(&self, buf: &Buffer, len: usize) -> Result<Vec<f32>> {
+        self.read_f32_offset(buf, len, 0)
+    }
+
+    pub fn read_f32_offset(&self, buf: &Buffer, len: usize, offset: u64) -> Result<Vec<f32>> {
         let size = (len * 4) as u64;
         let stage = self.buffer(
             size,
@@ -118,7 +122,7 @@ impl Gpu {
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("read") });
-        enc.copy_buffer_to_buffer(buf, 0, &stage, 0, size);
+        enc.copy_buffer_to_buffer(buf, offset, &stage, 0, size);
         self.queue.submit(Some(enc.finish()));
         let (tx, rx) = std::sync::mpsc::channel();
         let slice = stage.slice(..);
@@ -136,6 +140,16 @@ impl Gpu {
     }
 
     pub fn run(&self, pipeline: &wgpu::ComputePipeline, bind: &wgpu::BindGroup, wgs: u32) {
+        self.run2d(pipeline, bind, wgs, 1);
+    }
+
+    pub fn run2d(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        bind: &wgpu::BindGroup,
+        wgs_x: u32,
+        wgs_y: u32,
+    ) {
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("compute") });
@@ -146,7 +160,7 @@ impl Gpu {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind, &[]);
-            pass.dispatch_workgroups(wgs, 1, 1);
+            pass.dispatch_workgroups(wgs_x, wgs_y, 1);
         }
         self.queue.submit(Some(enc.finish()));
     }

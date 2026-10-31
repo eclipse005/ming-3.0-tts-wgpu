@@ -106,3 +106,240 @@ fn main(
     }
 }
 "#;
+
+/// Multi-token linear: y[t, r] = W[r, :] . X[t, :] + b[r].
+/// W bf16 packed [rows, in_words]; X f32 [T, in]; Y f32 [T, rows].
+/// One warp per (row, token); dispatch (rows/8, T).
+pub const GEMV_MROW: &str = r#"
+struct Params { rows: u32, in_words: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<u32>;
+@group(0) @binding(2) var<storage, read> x: array<f32>;   // [T, in]
+@group(0) @binding(3) var<storage, read> b: array<f32>;   // [rows]
+@group(0) @binding(4) var<storage, read_write> y: array<f32>; // [T, rows]
+var<workgroup> red: array<array<f32, 32>, 8>;
+
+fn bf_lo(u: u32) -> f32 { return bitcast<f32>((u & 0xFFFFu) << 16u); }
+fn bf_hi(u: u32) -> f32 { return bitcast<f32>(u & 0xFFFF0000u); }
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let warp = li / 32u;
+    let lane = lid.x % 32u;
+    let row = wg.x * 8u + warp;
+    let t = wg.y;
+    var acc = 0.0;
+    if (row < p.rows) {
+        let wbase = row * p.in_words;
+        let xbase = t * (p.in_words * 2u);
+        var wi = lane;
+        loop {
+            if (wi >= p.in_words) { break; }
+            let u = w[wbase + wi];
+            acc = acc + bf_lo(u) * x[xbase + wi * 2u] + bf_hi(u) * x[xbase + wi * 2u + 1u];
+            wi = wi + 32u;
+        }
+    }
+    red[warp][lane] = acc;
+    workgroupBarrier();
+    var s = 16u;
+    loop {
+        if (s == 0u) { break; }
+        if (lane < s) { red[warp][lane] = red[warp][lane] + red[warp][lane + s]; }
+        workgroupBarrier();
+        s = s / 2u;
+    }
+    if (lane == 0u && row < p.rows) {
+        y[t * p.rows + row] = red[warp][0] + b[row];
+    }
+}
+"#;
+
+/// Qwen2 RoPE (rotate-half) applied in place to q or k for one token per
+/// workgroup. cos/sin tables are [512, 32] f32, precomputed on host.
+/// pos = pos_base + wg.x; dispatch (1, 1) for decode, (T, 1) for prefill.
+pub const ROPE: &str = r#"
+struct Params { n_heads: u32, pos_base: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> cos_t: array<f32>;  // [512, 32]
+@group(0) @binding(2) var<storage, read> sin_t: array<f32>;
+@group(0) @binding(3) var<storage, read_write> q: array<f32>; // [T, n_heads*64]
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let token = wg.x;
+    let pos = p.pos_base + token;
+    var idx = lid.x;
+    loop {
+        if (idx >= p.n_heads * 32u) { break; }
+        let head = idx / 32u;
+        let hd = idx % 32u;
+        let base = token * p.n_heads * 64u + head * 64u;
+        let d1 = base + hd;
+        let d2 = d1 + 32u;
+        let c = cos_t[pos * 32u + hd];
+        let s = sin_t[pos * 32u + hd];
+        let x1 = q[d1];
+        let x2 = q[d2];
+        q[d1] = x1 * c - x2 * s;
+        q[d2] = x2 * c + x1 * s;
+        idx = idx + 256u;
+    }
+}
+"#;
+
+/// GQA attention for one query token per (head, token) workgroup.
+/// K/V caches: [n_kv_heads * 512 * 64] f32, head-major.
+/// Causal: query at position q_pos_base + t attends 0..=q_pos_base + t.
+pub const ATTEND: &str = r#"
+struct Params {
+    t_q: u32,          // number of query tokens
+    q_pos_base: u32,
+    heads_per_kv: u32,
+    scale: f32,
+}
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> q: array<f32>;   // [T, 896]
+@group(0) @binding(2) var<storage, read> kc: array<f32>;  // [n_kv*512*64]
+@group(0) @binding(3) var<storage, read> vc: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>; // [T, 896]
+var<workgroup> sc: array<f32, 512>;
+var<workgroup> wgt: array<f32, 512>;
+var<workgroup> red: array<f32, 64>;
+
+@compute @workgroup_size(64)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let head = wg.x;
+    let t = wg.y;
+    let kvh = head / p.heads_per_kv;
+    let qpos = p.q_pos_base + t;
+    let qbase = t * 896u + head * 64u;
+    let kbase = kvh * 512u * 64u;
+    let d = lid.x;
+
+    // scores for positions 0..=qpos (each lane owns pos d, d+64, ...)
+    var pmax = -3.0e38;
+    var pos = d;
+    loop {
+        if (pos > qpos) { break; }
+        var s = 0.0;
+        var dd = 0u;
+        loop {
+            if (dd >= 64u) { break; }
+            s = s + q[qbase + dd] * kc[kbase + pos * 64u + dd];
+            dd = dd + 1u;
+        }
+        s = s * p.scale;
+        sc[pos] = s;
+        pmax = max(pmax, s);
+        pos = pos + 64u;
+    }
+    red[d] = pmax;
+    workgroupBarrier();
+    var s2 = 32u;
+    loop {
+        if (s2 == 0u) { break; }
+        if (d < s2) { red[d] = max(red[d], red[d + s2]); }
+        workgroupBarrier();
+        s2 = s2 / 2u;
+    }
+    let m = red[0];
+
+    // weights + sum
+    var psum = 0.0;
+    pos = d;
+    loop {
+        if (pos > qpos) { break; }
+        let wv = exp(sc[pos] - m);
+        wgt[pos] = wv;
+        psum = psum + wv;
+        pos = pos + 64u;
+    }
+    red[d] = psum;
+    workgroupBarrier();
+    s2 = 32u;
+    loop {
+        if (s2 == 0u) { break; }
+        if (d < s2) { red[d] = red[d] + red[d + s2]; }
+        workgroupBarrier();
+        s2 = s2 / 2u;
+    }
+    let denom = red[0];
+
+    // weighted V sum: lane d owns output dims d (d < 64)
+    var acc = 0.0;
+    pos = 0u;
+    loop {
+        if (pos > qpos) { break; }
+        acc = acc + wgt[pos] * vc[kbase + pos * 64u + d];
+        pos = pos + 1u;
+    }
+    y[qbase + d] = acc / denom;
+}
+"#;
+
+/// out[i] = silu(g[i]) * u[i], elementwise over `n` elements.
+pub const SILU_MUL: &str = r#"
+struct Params { n: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> g: array<f32>;
+@group(0) @binding(2) var<storage, read> u: array<f32>;
+@group(0) @binding(3) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let i = wg.x * 256u + lid.x;
+    if (i < p.n) {
+        let v = g[i];
+        y[i] = v / (1.0 + exp(-v)) * u[i];
+    }
+}
+"#;
+
+/// y[i] = a[i] + b[i].
+pub const ADD: &str = r#"
+struct Params { n: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0) @binding(2) var<storage, read> b: array<f32>;
+@group(0) @binding(3) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let i = wg.x * 256u + lid.x;
+    if (i < p.n) { y[i] = a[i] + b[i]; }
+}
+"#;
+
+/// Copy k or v for one token per workgroup into the head-major cache:
+/// cache[((h * 512) + pos) * 64 + d] = src[token * (n_kv*64) + h * 64 + d].
+pub const KV_WRITE: &str = r#"
+struct Params { pos_base: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> src: array<f32>;   // [T, 128]
+@group(0) @binding(2) var<storage, read_write> cache: array<f32>; // [2*512*64]
+@compute @workgroup_size(128)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let token = wg.x;
+    let pos = p.pos_base + token;
+    let h = lid.x / 64u;
+    let d = lid.x % 64u;
+    cache[(h * 512u + pos) * 64u + d] = src[token * 128u + lid.x];
+}
+"#;

@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 mod gpu;
 mod nn;
 mod parity;
+mod qwen_lm;
 mod shaders;
 mod weights;
 

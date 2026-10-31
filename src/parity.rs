@@ -238,3 +238,61 @@ mod tests {
         assert!(worst < 1e-5, "gemv rel_l2 {worst:.3e} >= 1e-5");
     }
 }
+
+#[cfg(test)]
+mod m1_tests {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::qwen_lm::LlmEngine;
+    use crate::weights::Weights;
+
+    #[test]
+    fn llm_replay_matches_python() {
+        let pre = golden("m1_prefill_embeds.npy").unwrap();
+        let step_in = golden("m1_step_inputs.npy").unwrap();
+        let step_z = golden("m1_step_z.npy").unwrap();
+        let step_p = golden("m1_step_prob.npy").unwrap();
+        let t = pre.shape[0];
+        let s = step_in.shape[0];
+        assert_eq!(step_z.shape[0], s + 1, "z goldens = prefill + steps");
+
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let mut eng = LlmEngine::load(gpu, &weights).unwrap();
+
+        // prefill
+        let prob0 = eng.prefill(&pre.data, t).unwrap();
+        let z0 = golden_last_z(); // helper reads step_z row 0
+        let _ = z0;
+        println!("prefill stop prob = {:.6} vs python {:.6}", prob0[1], step_p.data[0]);
+        assert!((prob0[1] - step_p.data[0]).abs() < 1e-4, "prefill prob mismatch");
+
+        // decode steps
+        let mut worst_z = 0.0f32;
+        let mut worst_p = 0.0f32;
+        let mut stop_step = None;
+        for i in 0..s {
+            let z = eng.step(&step_in.data[i * 896..(i + 1) * 896], t + i).unwrap();
+            let want = &step_z.data[(i + 1) * 896..(i + 2) * 896];
+            let e = rel_l2(&z.0, want);
+            worst_z = worst_z.max(e);
+            worst_p = worst_p.max((z.1[1] - step_p.data[i + 1]).abs());
+            if stop_step.is_none() && z.1[1] > 0.5 && i + 1 > 3 {
+                stop_step = Some(i + 1);
+            }
+            if i < 3 || i + 1 == s {
+                println!("step {}: z rel_l2={e:.3e} prob={:.6} (py {:.6})",
+                         i + 1, z.1[1], step_p.data[i + 1]);
+            }
+        }
+        println!("worst z rel_l2={worst_z:.3e} worst prob abs={worst_p:.3e} stop_step={stop_step:?}");
+        assert!(worst_z < 1e-5, "decode z rel_l2 {worst_z:.3e} >= 1e-5");
+        assert!(worst_p < 1e-4, "stop prob abs {worst_p:.3e} >= 1e-4");
+        assert_eq!(stop_step, Some(40), "stop step must match python");
+    }
+
+    fn golden_last_z() -> Vec<f32> {
+        let z = golden("m1_step_z.npy").unwrap();
+        z.data[0..896].to_vec()
+    }
+}

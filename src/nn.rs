@@ -4,7 +4,7 @@
 use crate::gpu::Gpu;
 use crate::shaders;
 use anyhow::Result;
-use wgpu::{BindGroupLayout, ComputePipeline, ShaderModuleDescriptor};
+use wgpu::{BindGroupLayout, Buffer, ComputePipeline, ShaderModuleDescriptor};
 
 fn make_pipeline(gpu: &Gpu, src: &str, storage_ro: usize) -> (BindGroupLayout, ComputePipeline) {
     let module = gpu.device.create_shader_module(ShaderModuleDescriptor {
@@ -69,7 +69,8 @@ fn make_pipeline(gpu: &Gpu, src: &str, storage_ro: usize) -> (BindGroupLayout, C
 }
 
 fn uniform(gpu: &Gpu, data: &[u8]) -> wgpu::Buffer {
-    let buf = gpu.buffer(16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, "u");
+    let size = ((data.len() + 15) / 16 * 16).max(16) as u64;
+    let buf = gpu.buffer(size, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, "u");
     gpu.queue.write_buffer(&buf, 0, data);
     buf
 }
@@ -137,4 +138,51 @@ pub fn gemv_bf16w(
     });
     gpu.run(&pipeline, &bind, ((rows + 7) / 8) as u32);
     gpu.read_f32(&y_buf, rows)
+}
+
+// ---- generic kernel runner (M1+) ----
+
+pub(crate) struct Kernel {
+    pub bgl: BindGroupLayout,
+    pub pipe: ComputePipeline,
+}
+
+pub(crate) fn kernel(gpu: &Gpu, src: &str, storage_ro: usize) -> Kernel {
+    let (bgl, pipe) = make_pipeline(gpu, src, storage_ro);
+    Kernel { bgl, pipe }
+}
+
+impl Kernel {
+    /// uniform bytes, read-only buffers in binding order 1.., rw output last.
+    pub fn run(
+        &self,
+        gpu: &Gpu,
+        uni: &[u8],
+        ro: &[&Buffer],
+        rw: &Buffer,
+        wx: u32,
+        wy: u32,
+    ) {
+        let ub = uniform(gpu, uni); // size derived from uni.len()
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: ub.as_entire_binding(),
+        }];
+        for (i, b) in ro.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: (i + 1) as u32,
+                resource: b.as_entire_binding(),
+            });
+        }
+        entries.push(wgpu::BindGroupEntry {
+            binding: (ro.len() + 1) as u32,
+            resource: rw.as_entire_binding(),
+        });
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.bgl,
+            entries: &entries,
+        });
+        gpu.run2d(&self.pipe, &bind, wx, wy);
+    }
 }
