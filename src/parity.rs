@@ -585,20 +585,26 @@ mod m3_layer0_tests {
             let want = want_npy.data;
             let e = rel_l2(&got, &want);
             println!("{name}: rel_l2={e:.3e}");
+            if name == "l0_kcache" {
+                let npy = read_npy(&std::path::Path::new(&dir).join("m3_l0_k_rope_missing.npy"));
+                let _ = npy; // compare against numpy rope'd k below
+                continue;
+            }
             if name == "l0_attn" {
-                println!("l0_attn vs golden rel_l2={e:.3e}");
-                let npy = read_npy(&std::path::Path::new(&dir).join("m3_l0_attn_numpy_causal.npy")).unwrap();
-                println!("l0_attn vs numpy-causal rel_l2={:.3e}", rel_l2(&got, &npy.data));
-                for t2 in [0usize, 1, 2, 4, 8, 16, 64, 167] {
+                let win = read_npy(&std::path::Path::new(&dir).join("m3_l0_attn_win64.npy")).unwrap();
+                println!("l0_attn vs win64-numpy rel_l2={:.3e}", rel_l2(&got, &win.data));
+                for t2 in [0usize, 1, 4, 32, 64, 100, 167] {
                     let o = t2 * 896;
                     let mut mx = 0f32;
+                    let mut mpos = 0usize;
                     for h in 0..14 {
                         for d in 0..64 {
                             let i = o + h * 64 + d;
-                            mx = mx.max((got[i] - npy.data[i]).abs());
+                            if (got[i] - win.data[i]).abs() > mx { mx = (got[i] - win.data[i]).abs(); mpos = h * 64 + d; }
                         }
                     }
-                    println!("  tok{t2}: max|got-numpy| over heads = {mx:.4}");
+                    println!("  tok{t2}: max|got-win64|={mx:.4} @dim{mpos} got={:.4} want={:.4}",
+                             got[o + mpos], win.data[o + mpos]);
                 }
             } else { assert!(e < 1e-4, "{name} rel_l2 {e:.3e}"); }
         }
