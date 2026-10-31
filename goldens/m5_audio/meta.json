@@ -152,6 +152,45 @@
    "count": 158072,
    "sample_rate": 48000
   },
+  "spk_window_povey.f32": {
+   "shape": [
+    400
+   ],
+   "count": 400,
+   "size": 400
+  },
+  "spk_fft_input.f32": {
+   "shape": [
+    327,
+    512
+   ],
+   "count": 167424,
+   "source": "strided frames after DC removal, preemphasis, povey window and zero pad to 512"
+  },
+  "spk_power_spectrum.f32": {
+   "shape": [
+    327,
+    257
+   ],
+   "count": 84039,
+   "source": "rfft(frame).abs().pow(2)"
+  },
+  "spk_mel_padded.f32": {
+   "shape": [
+    80,
+    257
+   ],
+   "count": 20560,
+   "source": "get_mel_banks(80, 512, 16000, low=20) padded with a zero column"
+  },
+  "spk_fbank_raw.f32": {
+   "shape": [
+    327,
+    80
+   ],
+   "count": 26160,
+   "source": "log mel energies before the per-bin mean subtraction"
+  },
   "spk_lingguang_fbank.f32": {
    "shape": [
     327,

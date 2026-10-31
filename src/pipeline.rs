@@ -200,7 +200,11 @@ impl Pipeline {
         noise: &mut dyn Noise,
         p: &SynthParams,
     ) -> Result<LoopTrace> {
+        let t_pre = std::time::Instant::now();
         let (mut z, mut prob) = self.llm.prefill_full(embeds, t)?;
+        let prefill = t_pre.elapsed();
+        let mut dit_time = std::time::Duration::ZERO;
+        let mut llm_time = std::time::Duration::ZERO;
         let mut history = vec![0f32; HISTORY * LATENT_DIM];
         if let Some(pl) = prompt_latent {
             let n = prompt_latent_frames.min(HISTORY);
@@ -222,8 +226,10 @@ impl Pipeline {
         for step in 0..steps {
             let nz = noise.noise();
             let sde = noise.sde();
+            let t_d = std::time::Instant::now();
             let lat = self.dit.flow_sample_stoch(
                 &z, &history, &nz, &sde, p.cfg, p.sigma, p.temperature)?;
+            dit_time += t_d.elapsed();
             z_steps.push(z.clone());
             probs.push(prob[1]);
             latents.extend_from_slice(&lat);
@@ -234,8 +240,10 @@ impl Pipeline {
                 break;
             }
 
+            let t_l = std::time::Instant::now();
             let emb = self.project_latent(&lat)?;
             let (z2, p2) = self.llm.step(&emb, pos)?;
+            llm_time += t_l.elapsed();
             z = z2;
             prob = p2;
             pos += PATCH;
@@ -247,6 +255,12 @@ impl Pipeline {
         }
 
         let n_latents = latents.len() / LATENT_DIM;
+        if std::env::var("MING_PROFILE").is_ok() {
+            println!(
+                "    profile: prefill {:?} | dit {:?} | llm+agg {:?}",
+                prefill, dit_time, llm_time
+            );
+        }
         Ok(LoopTrace {
             latents,
             n_latents,

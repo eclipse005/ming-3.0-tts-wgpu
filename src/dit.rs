@@ -53,6 +53,14 @@ pub struct DitEngine {
     cos_buf: Buffer,
     sin_buf: Buffer,
     ones_1024: Buffer,
+    zero_c: Buffer, // 896 zeros: the CFG "null" conditioning branch
+    // One KV scratch pair shared by every block and every call. The old code
+    // allocated 2 MB per block per forward, which is 640 MB of live buffers
+    // per decode step now that dispatches are batched (the GPU cannot recycle
+    // a buffer while a recording references it) -- that is what ran the card
+    // out of memory. Only one block is ever in flight, so one pair suffices.
+    kv_k: Buffer,
+    kv_v: Buffer,
     k_rms: Kernel,
     k_mrow: Kernel,
     k_rope: Kernel,
@@ -62,6 +70,8 @@ pub struct DitEngine {
     k_kvwrite: Kernel,
     k_pack3: Kernel,
     k_gelu: Kernel,
+    k_cfm: Kernel,
+    k_mrow_t4: Kernel,
 }
 
 impl DitEngine {
@@ -138,6 +148,9 @@ impl DitEngine {
             cos_buf: gpu.upload_f32(&cos, "xrope.cos"),
             sin_buf: gpu.upload_f32(&sin, "xrope.sin"),
             ones_1024: gpu.upload_f32(&vec![1.0; XH], "ones"),
+            zero_c: gpu.upload_f32(&vec![0.0; 896], "zero_c"),
+            kv_k: gpu.storage((XHEADS * 512 * 64 * 4) as u64, "x.kv_k"),
+            kv_v: gpu.storage((XHEADS * 512 * 64 * 4) as u64, "x.kv_v"),
             k_rms: kernel(&gpu, RMSNORM, 2),
             k_mrow: kernel(&gpu, shaders::GEMV_MROW, 3),
             k_rope: kernel(&gpu, shaders::ROPE, 2),
@@ -147,6 +160,8 @@ impl DitEngine {
             k_kvwrite: kernel(&gpu, shaders::KV_WRITE, 1),
             k_pack3: kernel(&gpu, shaders::PACK3, 3),
             k_gelu: kernel(&gpu, shaders::GELU_TANH, 1),
+            k_cfm: kernel(&gpu, shaders::CFM_STEP, 3),
+            k_mrow_t4: kernel(&gpu, shaders::GEMV_MROW_T4, 3),
             gpu,
         })
     }
@@ -172,16 +187,35 @@ impl DitEngine {
         y
     }
 
+    /// Linear layer. Batches of up to 4 rows use the weight-reuse kernel; the
+    /// DiT only ever runs with 1-3 rows (t-embedding, cond embedder, and the
+    /// [cond, latent-history, latent] sequence), so the general kernel is
+    /// effectively only used by callers with long sequences.
     fn mrow(&self, lin: &Lin, x: &Buffer, t: usize) -> Result<Buffer> {
         let y = self.gpu.storage((t * lin.rows * 4) as u64, "x.mrow");
-        self.k_mrow.run(
-            &self.gpu,
-            &uni2(lin.rows as u32, (lin.in_features / 2) as u32),
-            &[&lin.w, x, &lin.b],
-            &y,
-            ((lin.rows + 7) / 8) as u32,
-            t as u32,
-        );
+        if t <= 4 {
+            let mut u = [0u8; 16];
+            u[0..4].copy_from_slice(&(lin.rows as u32).to_le_bytes());
+            u[4..8].copy_from_slice(&((lin.in_features / 2) as u32).to_le_bytes());
+            u[8..12].copy_from_slice(&(t as u32).to_le_bytes());
+            self.k_mrow_t4.run(
+                &self.gpu,
+                &u,
+                &[&lin.w, x, &lin.b],
+                &y,
+                ((lin.rows + 7) / 8) as u32,
+                1,
+            );
+        } else {
+            self.k_mrow.run(
+                &self.gpu,
+                &uni2(lin.rows as u32, (lin.in_features / 2) as u32),
+                &[&lin.w, x, &lin.b],
+                &y,
+                ((lin.rows + 7) / 8) as u32,
+                t as u32,
+            );
+        }
         Ok(y)
     }
 
@@ -208,9 +242,9 @@ impl DitEngine {
             let ru = self.rope_u();
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &q, t as u32, 1);
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
-            // stage k/v into cache layout ([16 * 512 * 64]) and attend (bidirectional)
-            let kc = self.gpu.storage((XHEADS * 512 * 64 * 4) as u64, "x.kc");
-            let vc = self.gpu.storage((XHEADS * 512 * 64 * 4) as u64, "x.vc");
+            // stage k/v into the shared cache layout ([16 * 512 * 64]) and attend
+            let kc = &self.kv_k;
+            let vc = &self.kv_v;
             let mut u = [0u8; 16];
             u[0..4].copy_from_slice(&0u32.to_le_bytes()); // pos_base
             u[4..8].copy_from_slice(&512u32.to_le_bytes()); // cap
@@ -246,11 +280,9 @@ impl DitEngine {
         Ok(h)
     }
 
-    /// One DiT forward for a single (cond or null) branch.
-    /// x: [64] noised latent; c: [896] llm cond; lh: [64] latent history.
-    pub fn dit_forward(&self, x: &[f32], t: f32, c: &[f32], lh: &[f32]) -> Result<Vec<f32>> {
-        // timestep embedding: sinusoidal(256, scale=1000, half=128,
-        // freqs = exp(arange * -log(10000)/127)) then MLP
+    /// Sinusoidal timestep embedding: 256 wide, scale 1000, half = 128,
+    /// freqs = exp(arange(128) * -log(10000)/127), sin then cos.
+    fn timestep_embedding(t: f32) -> Vec<f32> {
         let mut temb = vec![0f32; 256];
         for j in 0..128 {
             let e = ((j as f32) * -(10000f32.ln()) / 127.0).exp();
@@ -258,35 +290,56 @@ impl DitEngine {
             temb[j] = v.sin();
             temb[128 + j] = v.cos();
         }
-        let tm1 = gemv_bf16w_buf(&self.gpu, &self.t_mlp1.w, &self.t_mlp1.b, &temb, XH, 256)?;
-        let tm1b = self.gpu.upload_f32(&tm1, "tm1");
-        let sil = self.silu_mul(&tm1b, &self.ones_1024, XH);
-        let tm2 = gemv_bf16w_buf(&self.gpu, &self.t_mlp2.w, &self.t_mlp2.b, &self.gpu.read_f32(&sil, XH)?, XH, XH)?;
+        temb
+    }
 
-        let xn = gemv_bf16w_buf(&self.gpu, &self.x_emb.w, &self.x_emb.b, x, XH, ZC)?;
-        let xh = gemv_bf16w_buf(&self.gpu, &self.x_emb.w, &self.x_emb.b, lh, XH, ZC)?;
-        let ce = gemv_bf16w_buf(&self.gpu, &self.c_emb.w, &self.c_emb.b, c, XH, 896)?;
-        let y = vec_add(&tm2, &ce);
+    /// One DiT forward for a single (cond or null) branch, fully on the device.
+    /// x/c/lh are device buffers ([64] / [896] / [64]); the result is [3, 64]
+    /// with the prediction in row 2 -- callers read from offset 2 * ZC.
+    pub fn dit_forward_dev(
+        &self,
+        x: &Buffer,
+        t: f32,
+        c: &Buffer,
+        lh: &Buffer,
+    ) -> Result<Buffer> {
+        let temb = self.gpu.upload_f32(&Self::timestep_embedding(t), "temb");
+        let tm1 = self.mrow(&self.t_mlp1, &temb, 1)?;
+        let sil = self.silu_mul(&tm1, &self.ones_1024, XH);
+        let tm2 = self.mrow(&self.t_mlp2, &sil, 1)?;
+        let xn = self.mrow(&self.x_emb, x, 1)?;
+        let xh = self.mrow(&self.x_emb, lh, 1)?;
+        let ce = self.mrow(&self.c_emb, c, 1)?;
+        let y = self.add(&tm2, &ce, XH);
 
         // assemble seq [3, 1024] = [y, x_hist, x_now]
-        let yb = self.gpu.upload_f32(&y, "seq.y");
-        let xhb = self.gpu.upload_f32(&xh, "seq.xh");
-        let xnb = self.gpu.upload_f32(&xn, "seq.xn");
         let seq = self.gpu.storage((3 * XH * 4) as u64, "seq");
-        self.k_pack3.run(&self.gpu, &uni1(XH as u32), &[&yb, &xhb, &xnb], &seq, ((3 * XH + 255) / 256) as u32, 1);
-
+        self.k_pack3.run(
+            &self.gpu,
+            &uni1(XH as u32),
+            &[&y, &xh, &xn],
+            &seq,
+            ((3 * XH + 255) / 256) as u32,
+            1,
+        );
         let h = self.blocks_forward(&self.blocks, &seq, 3)?;
-        // final layer: rmsnorm -> linear -> take last row
         let fin = self.rms(&h, &self.fin_norm, 3);
-        let fin_host = self.gpu.read_f32_offset(&fin, XH, (2 * XH * 4) as u64)?;
-        let out = gemv_bf16w_buf(&self.gpu, &self.fin_lin.w, &self.fin_lin.b, &fin_host, ZC, XH)?;
-        Ok(out)
+        self.mrow(&self.fin_lin, &fin, 3)
+    }
+
+    /// Host-facing variant: same maths, one round-trip for the prediction.
+    pub fn dit_forward(&self, x: &[f32], t: f32, c: &[f32], lh: &[f32]) -> Result<Vec<f32>> {
+        let xb = self.gpu.upload_f32(x, "dx");
+        let cb = self.gpu.upload_f32(c, "dc");
+        let lhb = self.gpu.upload_f32(lh, "dlh");
+        let out = self.dit_forward_dev(&xb, t, &cb, &lhb)?;
+        self.gpu.read_f32_offset(&out, ZC, (2 * ZC * 4) as u64)
     }
 
     /// Aggregator: latent [64] -> projected llm cond [896].
     pub fn agg_forward(&self, latent: &[f32]) -> Result<Vec<f32>> {
-        let xn_v = gemv_bf16w_buf(&self.gpu, &self.agg_x_emb.w, &self.agg_x_emb.b, latent, XH, ZC)?;
-        let xn = self.gpu.upload_f32(&xn_v, "agg.xn");
+        let xb = self.gpu.upload_f32(latent, "agg.latent");
+        let xn = self.mrow(&self.agg_x_emb, &xb, 1)?;
         // seq [2, 1024] = [cls, x] — PACK3 with row 2 unused
         let seq = self.gpu.storage((2 * XH * 4) as u64, "agg.seq");
         self.k_pack3.run(
@@ -299,9 +352,9 @@ impl DitEngine {
         );
         let h = self.blocks_forward(&self.agg_blocks, &seq, 2)?;
         let fin = self.rms(&h, &self.agg_fin_norm, 2);
-        let fin_host = self.gpu.read_f32(&fin, 2 * XH)?; // take row 0 below
-        let row0 = &fin_host[0..XH];
-        gemv_bf16w_buf(&self.gpu, &self.agg_fin_lin.w, &self.agg_fin_lin.b, row0, 896, XH)
+        // project both rows on the device, then read back only the cls row
+        let out = self.mrow(&self.agg_fin_lin, &fin, 2)?;
+        self.gpu.read_f32_offset(&out, 896, 0)
     }
 
     /// Stage-by-stage bisect variant of dit_forward (parity diagnostics).
@@ -422,32 +475,54 @@ impl DitEngine {
         for i in 0..=STEPS {
             tv[i] += -1.0 * ((std::f32::consts::PI / 2.0 * tv[i]).cos() - 1.0 + tv[i]);
         }
-        let mut y = noise.to_vec();
+        // Everything below stays on the device: the Euler loop used to read
+        // the prediction back to the host twice per step, and each readback
+        // is a full device sync (~ms under WDDM), which is what made the port
+        // two orders of magnitude slower than it should be.
+        let zb = self.gpu.upload_f32(z, "cfm.z");
+        let lhb = self.gpu.upload_f32(lh, "cfm.lh");
+        let y = self.gpu.upload_f32(noise, "cfm.y");
+        let sde_zero = self.gpu.upload_f32(&[0f32; ZC], "cfm.sde0");
+        let mut out = Vec::with_capacity(ZC);
         for step in 0..STEPS {
             let dt = tv[step + 1] - tv[step];
-            let pred = self.dit_forward(&y, tv[step], z, lh)?;
-            let null = self.dit_forward(&y, tv[step], &vec![0.0; 896], lh)?;
+            let pred = self.dit_forward_dev(&y, tv[step], &zb, &lhb)?;
+            let null = self.dit_forward_dev(&y, tv[step], &self.zero_c, &lhb)?;
             if let Some((tx, tp, tn)) = trace.as_mut() {
-                tx.push(y.clone());
-                tp.push(pred.clone());
-                tn.push(null.clone());
+                let off = (2 * ZC * 4) as u64;
+                tx.push(self.gpu.read_f32(&y, ZC)?);
+                tp.push(self.gpu.read_f32_offset(&pred, ZC, off)?);
+                tn.push(self.gpu.read_f32_offset(&null, ZC, off)?);
             }
-            let mut vel = vec![0f32; ZC];
-            for i in 0..ZC {
-                vel[i] = pred[i] + (pred[i] - null[i]) * cfg;
-            }
-            for i in 0..ZC {
-                y[i] += vel[i] * dt;
-            }
-            if temperature > 0.0 {
-                let k = sigma * temperature.sqrt() * dt.abs().sqrt();
+            let k = if temperature > 0.0 {
+                sigma * temperature.sqrt() * dt.abs().sqrt()
+            } else {
+                0.0
+            };
+            let sde_buf = if k != 0.0 {
                 let base = step * ZC;
-                for i in 0..ZC {
-                    y[i] += k * sde[base + i];
-                }
-            }
+                let end = (base + ZC).min(sde.len());
+                self.gpu.upload_f32(&sde[base.min(sde.len())..end], "cfm.sde")
+            } else {
+                sde_zero.clone()
+            };
+            let mut u = [0u8; 32];
+            u[0..4].copy_from_slice(&(ZC as u32).to_le_bytes());
+            u[4..8].copy_from_slice(&dt.to_le_bytes());
+            u[8..12].copy_from_slice(&cfg.to_le_bytes());
+            u[12..16].copy_from_slice(&k.to_le_bytes());
+            u[16..20].copy_from_slice(&((2 * ZC) as u32).to_le_bytes());
+            self.k_cfm.run(
+                &self.gpu,
+                &u,
+                &[&pred, &null, &sde_buf],
+                &y,
+                ((ZC + 255) / 256) as u32,
+                1,
+            );
         }
-        Ok(y)
+        out.extend_from_slice(&self.gpu.read_f32(&y, ZC)?);
+        Ok(out)
     }
 
     fn _zero_c_host(&self) -> Vec<f32> {

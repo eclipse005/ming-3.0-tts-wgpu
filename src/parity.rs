@@ -832,7 +832,10 @@ mod m5_tests {
 
         let mut pl = Pipeline::load(&model_dir(), false).unwrap();
         let mut noise = GoldenNoise::new(draws);
-        let params = SynthParams::default();
+        let mut params = SynthParams::default();
+        if let Ok(v) = std::env::var("MING_STEPS") {
+            params.max_decode_steps = v.parse().unwrap();
+        }
         let t0 = std::time::Instant::now();
         let tr = pl
             .decode_loop(&embeds.data, expects, None, 0, &mut noise, &params)
@@ -897,5 +900,54 @@ mod m5_tests {
         assert!(worst < 2e-2, "z steps {worst:.3e}");
         assert!(worst_l < 2e-2, "latents {worst_l:.3e}");
         assert!(ew < 2e-2, "waveform {ew:.3e}");
+    }
+}
+
+
+#[cfg(test)]
+mod microbench2 {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::weights::Weights;
+
+    #[test]
+    fn device_path_vs_sync() {
+        let gpu = Gpu::new().unwrap();
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let dit = crate::dit::DitEngine::load(gpu.clone(), &weights).unwrap();
+        let x = vec![0.01f32; 64];
+        let c = vec![0.02f32; 896];
+        let lh = vec![0.03f32; 64];
+        let xb = gpu.upload_f32(&x, "bx");
+        let cb = gpu.upload_f32(&c, "bc");
+        let lhb = gpu.upload_f32(&lh, "blh");
+
+        // warm
+        let _ = gpu.read_f32(&dit.dit_forward_dev(&xb, 0.5, &cb, &lhb).unwrap(), 64).unwrap();
+
+        let t3 = std::time::Instant::now();
+        let mut last = None;
+        for _ in 0..20 {
+            last = Some(dit.dit_forward_dev(&xb, 0.5, &cb, &lhb).unwrap());
+        }
+        let dev = t3.elapsed();
+        let out = gpu.read_f32(&last.unwrap(), 64).unwrap();
+        let dev_all = t3.elapsed();
+        println!("20 dev forwards: {:?} -> {:?}/fwd, incl final read {:?}, out0={:.6}",
+                 dev, dev / 20, dev_all, out[0]);
+
+        let t4 = std::time::Instant::now();
+        for _ in 0..10 {
+            gpu.flush();
+        }
+        println!("10 empty flush: {:?}", t4.elapsed());
+
+        // one readback of a tiny buffer, repeated
+        let small = gpu.upload_f32(&[0f32; 64], "small");
+        let t5 = std::time::Instant::now();
+        for _ in 0..10 {
+            let _ = gpu.read_f32(&small, 64).unwrap();
+        }
+        println!("10 tiny readbacks: {:?}", t5.elapsed());
     }
 }

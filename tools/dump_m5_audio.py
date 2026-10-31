@@ -327,7 +327,7 @@ def dump_speaker(ling, ling_sr):
         'povey', 400, 0.42, wav16.device, wav16.dtype)
     save_f32('spk_window_povey', window.numpy(), size=400)
     fft_input, _ = kaldi._get_window(
-        wav16[0:1], 512, 400, 160, 'povey', 0.42, True, True, 1.0, 0.0, True,
+        wav16[0], 512, 400, 160, 'povey', 0.42, True, True, 1.0, 0.0, True,
         0.97)
     save_f32('spk_fft_input', fft_input.numpy(),
              source='strided frames after DC removal, preemphasis, povey '

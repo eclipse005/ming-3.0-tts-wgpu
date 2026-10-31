@@ -23,7 +23,76 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
 | M2 | DiT + Aggregator（固定 seed 噪声注入） | latent rel_l2 < 2e-3 | ✅ 2026-10-31（41 步独立对拍 worst 1.12e-3；首链 y 轨迹 3e-4；单次 dit_forward 1.26e-4） |
 | M3 | VAE Encoder（prompt → latent） | 与 Python 导出 latent 对拍 | ✅ 2026-10-31（24 层栈 1.9e-6 / aggregator 2.1e-6 / mean 1.4e-6 / std 8.3e-7 / latent 1.4e-6） |
 | M4 | VAE Decoder + iSTFT 全链路 | 频谱 L2 + 时长 + 试听 | ✅ 2026-10-31（fc1 1.6e-7 / 上采样 1.5e-7 / 24 层栈 1.5e-6 / head 6.8e-7 / **波形 1.9e-6**，长度 148176 一致） |
-| M5 | 性能调优 + 全参数验收 | params_test/ 36 样本对齐 | ⬜ |
+| M5 | 性能调优 + 全参数验收 | params_test/ 36 样本对齐 | 🔨 **A1 端到端跑通**（时长逐样本一致、log-mel 相关 0.999991）；36 样本待跑；**RTF 3.08 vs Python 0.88，性能还在收**（见下） |
+
+
+## M5 记录（2026-10-31，端到端首次跑通）
+
+### 能跑什么
+
+```bat
+wgpu\target\release\ming-tts-wgpu.exe synth ^
+  --model_path D:/Ming-3.0-tts/Ming-3.0-tts-0.5b ^
+  --task TTS --text "今天天气真不错，我们一起去公园散步吧。" ^
+  --output D:/Ming-3.0-tts/output/rust/A1_bare.wav --no_text_normalization
+```
+
+参数面与 `infer.py` 逐字一致（clap 用 `rename_all = "snake_case"`，否则会变成
+`--model-path` 之类）。`MING_NOISE_GOLDEN=<dir>` 可灌入金标 torch.randn 抽样，
+用来和 Python 逐样本对拍；`MING_PROFILE=1` 打印分段耗时。
+
+### A1_bare 验收（金标 RNG 注入，与 `output/params_test/A1_bare.wav` 对比）
+
+| 指标 | 结果 |
+|---|---|
+| 时长 | 3.200 s vs 3.200 s（**采样点数 141120 完全一致**） |
+| 波形 rel_l2 | 6.46e-3 |
+| 峰值 | 0.5910 vs 0.5916 |
+| **log-mel 相关** | **0.999991** |
+| log-mel 平均绝对差 | 0.0045 |
+
+也就是说：同一个 seed 下，Rust 端产出的是**同一句话、同一时长、频谱几乎重合**的音频。
+
+### 前端移植（子代理完成，全部对拍）
+
+- `text.rs`（toolkit + text_segment_cut）：695 条语料 / 10425 个字段相等 / 4526 个
+  切分向量一致；1,112,064 个码点 × 5 类字符判定的 0 差异。
+- `tasks.rs`（tts_tasks）：params_test 36 个 request **JSON 逐字节一致**；
+  19 个正常 + 13 个报错路径（连 ValueError 文案）一致。
+- `audio.rs`：`read_wav` 与 torchaudio **逐样本相同**（158072/158072，max abs 0）；
+  `write_wav` 与 torchaudio.save **逐字节相同**（含 libsndfile 的 fact/PEAK 块）；
+  `resample` 与 torchaudio.transforms.Resample 最大绝对误差 4.5e-8 ~ 5.7e-6。
+- `tok.rs`：90 条语料 / 838 个 token、11 条 `build_input_ids` 序列 / 946 个 token
+  **完全一致**，8 个 pinned id 全部命中。
+- `spk.rs`：CAMPlus 走 ort（`load-dynamic`，不下载不链接，运行时定位
+  onnxruntime.dll）；kaldi fbank 全链路自实现，192 维 embedding 最大绝对误差 1.5e-5。
+
+### 参考实现的两个"怪癖"，移植时**故意保留**
+
+1. `frontend/toolkit.py:180` 的 `re.sub(r"([{ch_puncs}])\1+"…)` **漏了 f 前缀**，
+   字符类其实是字面量 `{ch_puncs}`（即 c,h,p,u,n,s,_,{,}）。所以 `……` 从不被折叠，
+   而 `cc`/`ss`/`pp` 会被折叠。Rust 端照抄，金标钉死。
+2. `build_task_generation_kwargs` 会把 `**kwargs` 塞进返回 dict，`synthesize` 传了
+   `spk_emb_path`，所以每个 request 都带 `"spk_emb_path": null`。
+
+### 性能现状与下一步
+
+分段（40 步、3.2 s 音频）：prefill 0.53 s / **DiT 7.92 s** / LLM+agg 1.42 s，
+合计 9.87 s → **RTF 3.08**（Python 0.88）。模型加载 ~5 s（一次性）。
+
+DiT 占 80%，单次 `dit_forward` 8.1 ms，对应 192 MB 权重流量 → 约 24 GB/s，
+只有卡面带宽的 ~1/8。已排除的原因：dispatch 提交（已并成单 pass）、readback
+（环内零同步）、buffer 分配（2.8 µs/次）、4-word 展开（反而更慢 → 不是纯延迟受限）。
+
+下一步按收益排序：
+1. **pred/null 合批**：`forward_with_cfg` 在 Python 里是 batch-2、权重只读一遍。
+   要做就得给 ATTEND 加"分组注意力"（0-2 行与 3-5 行互不可见）+ PACK6，
+   预计 DiT 7.9 s → ~4 s。
+2. **GEMV 换成真正的 tiled GEMM**（每 workgroup 把权重 tile 读进 shared memory，
+   再对全部 t 个 token 复用）：这是把 24 GB/s 拉向 100+ GB/s 的正路，
+   预计还有 2-3 倍。做完才可能压到 0.88 以内。
+3. 顺带：`linear_proj_audio`（agg）每步 1 次 8 层前向、LLM 每步满读 715 MB 权重，
+   后者是 LLM+agg 那 1.42 s 的主因，量化或 fp16（DiT/VAE 部分）可再省。
 
 ## M0 记录（2026-10-31）
 
@@ -155,6 +224,60 @@ self.norm），已加 `enc_norm/agg_norm`；·fc3 的 mean/std 是 [row, 128] �
   金标导出时统一 `np.ascontiguousarray`。
 - 新增 `src/istft.rs` / `src/vae_dec.rs`，`Gpu` 改为 Clone（设备句柄可共享，
   为 M5 单设备多阶段铺路）。
+
+## M5 记录（进行中）
+
+### 解码环（已跑通）
+
+- `pipeline.rs`：ids → embeddings → prefill → 每步 CFM 采样 → latent history 滑动
+  → VAE decode → 尾静音裁剪。顺序严格照抄 `sample()/generate()` 的怪癖：
+  停止那一步的 latent 仍然计入、history 在 step 0 用 prompt latent 预热、
+  每步先抽两次 torch.randn（noise + sde_noise）再跑采样器。
+- **首个 grid 里的大坑：DiT 的 GELU 是 tanh 变体。**
+  `fm/modules.py` 的 FeedForward 用 `nn.GELU(approximate="tanh")`，M2 里我用的是
+  erf 近似（A&S 7.1.26），两者差到 1e-3，单次 `dit_forward` 就卡在 1.2e-4 上不去。
+  改成 `0.5x(1+tanh(0.79788456(x+0.044715x³)))`（PyTorch 内核同式）后：
+  block0 1.2e-4 → **2.4e-5**，flowloss 1.12e-3 → **1.28e-4**，
+  端到端波形 1.8e-2 → **6.5e-3**。
+- 40 步真实解码环对拍（金标 `goldens/m5/`，含 80 次 torch.randn 的原始抽样）：
+  **步数 40 与 Python 完全一致**（停止判据一致 → 时长一致），
+  z 逐步 6e-7 → 步 1 9e-5 → 末步 2e-3，波形 rel_l2 6.5e-3。
+- **逐位对齐做不到，也不该拿它做门限**：单次 DiT 前向的 2.6e-5 已经是 f32 底噪
+  （cuBLAS 分块归约 vs 我们的顺序 GEMV，不是 bug——权重是 bf16 无损展宽，值完全相同），
+  而自回归 + 扩散把每步噪声放大成 ~1e-2。所以断言放在**结构不变量**上：
+  步数/停止判据必须完全一致，波形给 2e-2 的宽容差。
+  这也是为什么金标里的 `A1_bare.wav` 与 `goldens/m5/waveform.npy` **逐位相同**
+  （rel_l2 = 0.0）——验收锚点是同一个东西。
+- **RNG 决策（待用户拍板）**：对拍用金标注入 noise；生产路径用
+  xoshiro256** + Box-Muller，**没有**复刻 torch 的 Philox/CUDA 抽样。
+  代价：同 seed 下 Rust 波形与 Python 不会逐样本相同（内容和时长一致）。
+  要逐样本一致就得复刻 `curand_normal4`（Philox4x32-10 + 具体的 counter/offset
+  与 Box-Muller 映射），是一块独立且可验证的工作（手里已有 1895 seed 的前 64 个
+  真值可以当测试向量）。
+
+### 性能（定位与第一轮修复）
+
+三个结构性问题，逐个都量过：
+
+1. **每个 kernel dispatch 单独建 encoder + submit** —— 一句话音上万次 WDDM 提交。
+   改成把 dispatch 记进队列、flush 时回放到**同一个 compute pass**
+   （WebGPU 保证 dispatch 间可见性，顺序不变）。
+2. **每次 readback 都 `poll(wait)`** —— 实测 ~175 µs/次。原来每个 DiT forward 有
+   6 次 readback（t_mlp×2、x_emb×3、final×1）× 20 forward × 40 步 = 4800 次同步。
+   现在采样环内**零 readback**：新增 `CFM_STEP` 内核在设备上完成
+   `y += (pred + (pred-null)*cfg)*dt + k*sde`，DiT 的 t-embed/cond/final 也全走
+   `GEMV_MROW` + 设备缓冲，只有每步末尾取一次 latent。
+3. **buffer 生命周期**：批量化后一个 recording 引用着的 buffer 不能回收，
+   累积几千个后 Vulkan 直接报 "Out of Memory"（不是真没显存）。所以 `flush()`
+   必须 submit + poll，另外 DiT 的 KV scratch 从"每 block 每前向 4 MB"改成
+   全引擎共用一对（原本单步 640 MB 存活缓冲）。
+
+实测（release，P104-100）：单个 DiT forward 从 17 ms 降到 **12.9 ms**，
+但**瓶颈不在提交了**：`GEMV_MROW` 按 (row, token) 分派，等于每个 token 重读一遍权重
+（t=3 → 每前向 576 MB 权重流量）；Python 端 `forward_with_cfg` 是 batch-2、
+权重只读一遍。**下一步（明确的优化项）**：改写 MROW 为"一次加载权重、对 t 个
+token 累加"，预期 13 ms → ~3 ms；再叠加 pred/null 合批。这样才可能压进
+Python 的 110 ms/步（RTF 0.88）。
 
 **RNG 备注（M5 会用）**：prompt latent 与 CFM 噪声都走 torch.randn，
 对拍时由金标注入 eps（已存 m3_eps.npy）；要做到 bit-exact 需复刻 torch Philox，

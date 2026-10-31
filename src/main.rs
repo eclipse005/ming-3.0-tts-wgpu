@@ -14,9 +14,9 @@ mod istft;
 mod nn;
 mod parity;
 mod pipeline;
-mod prompt;
 mod qwen_lm;
 mod shaders;
+mod synth;
 mod spk;
 mod tasks;
 mod text;
@@ -37,6 +37,9 @@ enum Cmd {
     /// List GPU adapters visible to wgpu.
     Devices,
     /// Synthesize speech (same argument surface as Python infer.py).
+    /// rename_all keeps the flags byte-identical to infer.py's (--model_path,
+    /// --no_text_normalization, ...) instead of clap's default kebab-case.
+    #[command(rename_all = "snake_case")]
     Synth {
         #[arg(long)] model_path: String,
         #[arg(long)] task: String,
@@ -59,9 +62,9 @@ enum Cmd {
         #[arg(long, default_value_t = 0.0)] temperature: f64,
         #[arg(long, default_value_t = 24)] max_length: usize,
         #[arg(long, default_value_t = 1000)] max_decode_steps: usize,
-        #[arg(long)] prompt_wav_path: Option<String>,
+        #[arg(long, num_args = 1..)] prompt_wav_path: Vec<String>,
         #[arg(long)] prompt_text: Option<String>,
-        #[arg(long)] spk_emb_path: Option<String>,
+        #[arg(long, num_args = 1..)] spk_emb_path: Vec<String>,
         #[arg(long)] use_spk_emb: bool,
         #[arg(long)] use_zero_spk_emb: bool,
         #[arg(long)] no_text_normalization: bool,
@@ -78,15 +81,45 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Synth { task, device, .. } => {
-            let _ = task;
-            let _ = device;
-            eprintln!("synth: not implemented yet.");
-            eprintln!("Landing order (see PROGRESS.md): M1 LLM decode -> M2 DiT ->");
-            eprintln!("M3/M4 VAE+iSTFT -> M5 full params_test alignment.");
-            eprintln!("The full infer.py flag surface above is already accepted and");
-            eprintln!("will be honored as each stage lands.");
-            std::process::exit(2);
+        Cmd::Synth {
+            model_path, task, text, output, device, seed, language_id,
+            instruction, instruction_schema, speed, pitch, volume, emotion,
+            dialect, style, ip, cfg, sigma, temperature, max_length,
+            max_decode_steps, prompt_wav_path, prompt_text, spk_emb_path,
+            use_spk_emb, use_zero_spk_emb, no_text_normalization, raw_text,
+            no_trim_silence,
+        } => {
+            let _ = device; // accepted for infer.py parity; wgpu picks the adapter
+            synth::run(synth::Args {
+                model_path: model_path.clone(),
+                task: task.clone(),
+                text: text.clone(),
+                output: output.clone(),
+                seed: *seed,
+                language_id: language_id.clone(),
+                instruction: instruction.clone(),
+                instruction_schema: instruction_schema.clone(),
+                speed: speed.clone(),
+                pitch: pitch.clone(),
+                volume: volume.clone(),
+                emotion: emotion.clone(),
+                dialect: dialect.clone(),
+                style: style.clone(),
+                ip: ip.clone(),
+                cfg: *cfg,
+                sigma: *sigma,
+                temperature: *temperature,
+                max_length: *max_length,
+                max_decode_steps: *max_decode_steps,
+                prompt_wav_path: prompt_wav_path.clone(),
+                prompt_text: prompt_text.clone(),
+                spk_emb_path: spk_emb_path.clone(),
+                use_spk_emb: *use_spk_emb,
+                use_zero_spk_emb: *use_zero_spk_emb,
+                no_text_normalization: *no_text_normalization,
+                raw_text: *raw_text,
+                no_trim_silence: *no_trim_silence,
+            })
         }
     }
 }

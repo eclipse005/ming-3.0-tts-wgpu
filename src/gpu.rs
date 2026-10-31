@@ -1,6 +1,7 @@
 //! wgpu device setup and buffer helpers (lean port of the qwen3-asr-wgpu patterns).
 
 use anyhow::{bail, Context, Result};
+use std::cell::RefCell;
 use wgpu::{Backends, Buffer, BufferUsages, Device, Instance, Queue};
 
 // Device/Queue are internally reference counted, so a clone shares the same
@@ -11,6 +12,29 @@ pub struct Gpu {
     pub queue: Queue,
     pub adapter_name: String,
     pub backend: &'static str,
+    /// Dispatch batching. Every kernel launch used to create its own command
+    /// encoder and submit it, which is thousands of WDDM submissions per
+    /// utterance (the CUDA build was saved by CUDA graphs for the same
+    /// reason). Launches now accumulate into one encoder that is flushed at
+    /// the next synchronisation point (a readback) or when it grows large.
+    dispatches: std::sync::Arc<RefCell<Vec<PendingDispatch>>>,
+    pending_count: std::sync::Arc<std::cell::Cell<usize>>,
+}
+
+struct PendingDispatch {
+    pipeline: wgpu::ComputePipeline,
+    bind: wgpu::BindGroup,
+    wgs_x: u32,
+    wgs_y: u32,
+}
+
+const MAX_PENDING: usize = 512;
+
+fn max_pending() -> usize {
+    std::env::var("MING_MAX_PENDING")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MAX_PENDING)
 }
 
 fn instance() -> Instance {
@@ -76,6 +100,8 @@ impl Gpu {
             queue,
             adapter_name: info.name,
             backend,
+            dispatches: std::sync::Arc::new(RefCell::new(Vec::new())),
+            pending_count: std::sync::Arc::new(std::cell::Cell::new(0)),
         })
     }
 
@@ -116,6 +142,7 @@ impl Gpu {
     }
 
     pub fn read_f32_offset(&self, buf: &Buffer, len: usize, offset: u64) -> Result<Vec<f32>> {
+        self.flush();
         let size = (len * 4) as u64;
         let stage = self.buffer(
             size,
@@ -146,6 +173,39 @@ impl Gpu {
         self.run2d(pipeline, bind, wgs, 1);
     }
 
+    /// Record a dispatch into the pending batch.
+    ///
+    /// The batch is replayed into ONE compute pass at flush time. That is not
+    /// a micro-optimisation: a pass per dispatch made every kernel pay the
+    /// full pipeline-drain latency (a 3-token DiT forward measured 17 ms with
+    /// ~110 dispatches, i.e. ~150 us each for ~3.5 us of arithmetic), which is
+    /// the same launch-latency problem the CUDA build solved with CUDA graphs.
+    /// WebGPU guarantees each dispatch sees the previous one's writes, so the
+    /// ordering is preserved.
+    pub fn flush(&self) {
+        let mut dq = self.dispatches.borrow_mut();
+        if dq.is_empty() {
+            return;
+        }
+        let mut enc = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("batch") },
+        );
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            for d in dq.iter() {
+                pass.set_pipeline(&d.pipeline);
+                pass.set_bind_group(0, &d.bind, &[]);
+                pass.dispatch_workgroups(d.wgs_x, d.wgs_y, 1);
+            }
+        }
+        dq.clear();
+        self.queue.submit(Some(enc.finish()));
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
     pub fn run2d(
         &self,
         pipeline: &wgpu::ComputePipeline,
@@ -153,21 +213,21 @@ impl Gpu {
         wgs_x: u32,
         wgs_y: u32,
     ) {
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("compute") });
         {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: None,
-                timestamp_writes: None,
+            let mut dq = self.dispatches.borrow_mut();
+            dq.push(PendingDispatch {
+                pipeline: pipeline.clone(),
+                bind: bind.clone(),
+                wgs_x,
+                wgs_y,
             });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind, &[]);
-            pass.dispatch_workgroups(wgs_x, wgs_y, 1);
         }
-        self.queue.submit(Some(enc.finish()));
-    }
-}
+        let n = self.pending_count.get() + 1;
+        self.pending_count.set(n);
+        if n % max_pending() == 0 {
+            self.flush();
+        }
+    }}
 
 pub fn assert_f32_multiple(n: usize) -> Result<()> {
     if n % 4 != 0 {
