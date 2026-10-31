@@ -265,6 +265,9 @@ impl Pipeline {
         if frame == 0 || speech.len() < frame {
             return speech[..speech.len().min(tail)].to_vec();
         }
+        // The reference first truncates to a whole number of 0.1 s frames and
+        // only then slices the tail off that truncated signal; slicing the
+        // original length instead leaves the partial frame in place.
         let num_frames = (speech.len() - frame) / frame + 1;
         let body = &speech[..num_frames * frame];
         let mut scores = vec![0f32; num_frames];
@@ -277,9 +280,9 @@ impl Pipeline {
             index -= 1;
         }
         if index < 0 {
-            return speech[..speech.len().min(tail)].to_vec();
+            return body[..body.len().min(tail)].to_vec();
         }
-        let end = (index as usize * frame + frame + tail).min(speech.len());
-        speech[..end].to_vec()
+        let end = (index as usize * frame + frame + tail).min(body.len());
+        body[..end].to_vec()
     }
 }
