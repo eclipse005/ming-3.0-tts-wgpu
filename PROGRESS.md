@@ -21,7 +21,7 @@ Python/torch/CUDA 依赖），全程用逐层 parity 对拍保真。分析见
 | M0 | 骨架：gpu 初始化 + bf16 权重加载 + rmsnorm/gemv 内核 + 单层 parity | rel_l2 < 1e-5 | ✅ 2026-10-31（rmsnorm 1.0e-7 / gemv 3.0e-7，Vulkan 上 P104-100 实测） |
 | M1 | LLM：prefill + KV 解码 + stop head | 停止步数强断言（60+ 文本/seed） | ✅ 2026-10-31（真实序列 40 步重放：z rel_l2 8.1e-7、prob 差 3.9e-6、stop_step=40 与 Python 一致；多文本/seed 批量断言留 M5 验收一并跑） |
 | M2 | DiT + Aggregator（固定 seed 噪声注入） | latent rel_l2 < 2e-3 | ✅ 2026-10-31（41 步独立对拍 worst 1.12e-3；首链 y 轨迹 3e-4；单次 dit_forward 1.26e-4） |
-| M3 | VAE Encoder（prompt → latent） | 与 Python 导出 latent 对拍 | 🔨 定位中：frames/fc1/fc2/embeds ✓ 3.7e-7；layer0 的 q/k/v/rope ✓ 1e-7；**发散点 = attention 输出（0.73）**，双向/θ=10000 假设已排除；下一步用 torch SDPA-math 对照 |
+| M3 | VAE Encoder（prompt → latent） | 与 Python 导出 latent 对拍 | ✅ 2026-10-31（24 层栈 1.9e-6 / aggregator 2.1e-6 / mean 1.4e-6 / std 8.3e-7 / latent 1.4e-6） |
 | M4 | VAE Decoder + iSTFT 全链路 | 频谱 L2 + 时长 + 试听 | ⬜ |
 | M5 | 性能调优 + 全参数验收 | params_test/ 36 样本对齐 | ⬜ |
 
@@ -111,3 +111,30 @@ Qwen2Model 自带的 Qwen2Attention+Qwen2RotaryEmbedding。
   anchor 不匹配未打入，需以实际文本（含 env 行）为锚重打；parity 测试里 l0_kcache
   分支已预留（continue 跳过）。
 - 注意：layer0_parts 的 au[16..20] 是 MING_VAE_FULL env 行（默认 causal=0 ✓）。
+
+## M3 收口（2026-10-31，✅ 全绿）
+
+**根因 1（真 bug）：k_rope 用了 Q_HEADS 而不是 KV_HEADS。** ROPE 内核用
+`token * n_heads * 64 + head * 64` 定位，而 k 缓冲区的行距是 `n_kv*64 = 128`；
+传 14 头进去后，第 t 个 token 的写入基址变成 `t*896`（应为 `t*128`）——
+token 0 恰好落在 0 所以对，token 越大偏得越远。这正好解释"tok0-2 精确、误差随
+token 索引单调增长"的症状，也让"KV cache 只写了位置 0"的怀疑得以排除（cache 本身没问题）。
+修法：k 的 rope 传 `uni2(KV_HEADS, 0)`（vae.rs 三处：stack / stack_range_check / layer0_parts）。
+
+**根因 2（金标 bug）：dump_m3.py 的 cls 抽取写错。**
+`a.reshape(1, -1, 5)` 会把 hidden 维一起卷进分组维（[1,210,896] → [1,37632,5]），
+于是 `fc3_in/fc3_out/mean/std` 四个金标全是垃圾（彼此自洽因此骗过了
+"fc3_in→fc3_out 1.3e-7"的自检）。正确写法是
+`a.reshape(-1, patch+1, dim)[:, -1:, :].reshape(bsz, -1, dim)`，与
+`Encoder.forward` 的 `x.reshape(-1, patch_size+1, dim)[:, -1:, :]` 一致。
+修正后 fc3_in 1.3e-6、fc3_out 2.0e-7、mean 1.4e-6、std 8.3e-7、latent 1.4e-6。
+**教训**：手工复刻 forward 路径的金标极容易与被复刻的实现分叉；能挂 hook 就不要手写。
+
+**其余修正**：·滑窗 64 真正的缺口是 ATTEND 的 window 参数（现在 qwen_lm window=0 /
+vae window=64）；·enc/agg 末端的 `norm` RMSNorm 确实生效（Qwen2Model.forward 末尾
+self.norm），已加 `enc_norm/agg_norm`；·fc3 的 mean/std 是 [row, 128] 的前 64/后 64 维，
+不是交错；·门限收紧到 1e-4。
+
+**RNG 备注（M5 会用）**：prompt latent 与 CFM 噪声都走 torch.randn，
+对拍时由金标注入 eps（已存 m3_eps.npy）；要做到 bit-exact 需复刻 torch Philox，
+留到 M5 再决策。

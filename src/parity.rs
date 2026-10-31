@@ -487,9 +487,11 @@ mod m3_tests {
         let (gm, gs, p) = enc.encode_params(&wf.data).unwrap();
         println!("patches={p} mean rel_l2={:.3e} std rel_l2={:.3e}",
                  rel_l2(&gm, &mean.data), rel_l2(&gs, &std.data));
+        println!("mean[:4] got={:?} want={:?}", &gm[0..4], &mean.data[0..4]);
+        println!("std[:4]  got={:?} want={:?}", &gs[0..4], &std.data[0..4]);
         assert_eq!(p, mean.shape[0]);
-        assert!(rel_l2(&gm, &mean.data) < 1e-3, "mean >= 1e-3");
-        assert!(rel_l2(&gs, &std.data) < 1e-3, "std >= 1e-3");
+        assert!(rel_l2(&gm, &mean.data) < 1e-4, "mean >= 1e-4");
+        assert!(rel_l2(&gs, &std.data) < 1e-4, "std >= 1e-4");
         // latent = mean + std * eps with the python-drawn eps
         let mut lat = vec![0f32; gm.len()];
         for i in 0..gm.len() {
@@ -497,7 +499,7 @@ mod m3_tests {
         }
         let el = rel_l2(&lat, &latent.data);
         println!("latent rel_l2={el:.3e}");
-        assert!(el < 1e-3, "latent >= 1e-3");
+        assert!(el < 1e-4, "latent >= 1e-4");
     }
 }
 
@@ -538,9 +540,17 @@ mod m3_bisect_tests {
         assert!(rel_l2(&e, &embeds) < 1e-4, "embeds");
         // stage 3: 24-layer encoder (layer 0 first)
         let layer0 = g("m3_layer0.npy").data;
-        let l0 = enc.stack_range_check(&e, t_frames, 0..1).unwrap();
-        println!("layer0 rel_l2={:.3e}", rel_l2(&l0, &layer0));
-        assert!(rel_l2(&l0, &layer0) < 1e-4, "layer0");
+        for li in [0usize, 1, 2, 4, 8, 16, 23] {
+            let lname = format!("m3_layer{li}.npy");
+            let ldir = std::env::var("MING_GOLDEN")
+                .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
+            let lg = read_npy(&std::path::Path::new(&ldir).join(&lname)).unwrap();
+            let lo = enc.stack_range_check(&e, t_frames, 0..li + 1).unwrap();
+            let e = rel_l2(&lo, &lg.data);
+            println!("layer{li}: rel_l2={e:.3e} absmax_want={:.3e}",
+                     lg.data.iter().fold(0f32, |a, b| a.max(b.abs())));
+            if li <= 1 { assert!(e < 1e-4, "layer{li} {e:.3e}"); }
+        }
         let eo = enc.encode_stack_check(&e, t_frames).unwrap();
         println!("enc_out rel_l2={:.3e}", rel_l2(&eo, &enc_out));
         for t2 in [0usize, 1, 2, 4, 8, 32, 63, 64, 100, 167] {
@@ -577,19 +587,27 @@ mod m3_layer0_tests {
         let dir = std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
         for (name, got) in enc.layer0_parts_check(&embeds, t).unwrap() {
-                        let want_npy = if name == "l0_attn" {
+            if name == "l0_kcache" {
+                let krpy = read_npy(&std::path::Path::new(&dir).join("m3_l0_k_rope.npy")).unwrap();
+                let kprj = read_npy(&std::path::Path::new(&dir).join("m3_l0_k_proj.npy")).unwrap();
+                println!("l0_kcache vs rope-k rel_l2={:.3e} | vs pre-rope-k rel_l2={:.3e}",
+                         rel_l2(&got, &krpy.data), rel_l2(&got, &kprj.data));
+                println!("  cache[0..4]={:?} rope-k[0..4]={:?} pre[0..4]={:?}",
+                         &got[0..4], &krpy.data[0..4], &kprj.data[0..4]);
+                println!("  cache[128..132]={:?} rope-k[128..132]={:?}",
+                         &got[128..132], &krpy.data[128..132]);
+                continue;
+            }
+            let want_npy = if name == "l0_attn" {
                 read_npy(&std::path::Path::new(&dir).join("m3_l0_attn.npy")).unwrap()
+            } else if name == "l0_kcache" {
+                read_npy(&std::path::Path::new(&dir).join("m3_l0_k_rope.npy")).unwrap()
             } else {
                 read_npy(&std::path::Path::new(&dir).join(format!("m3_{name}.npy"))).unwrap()
             };
             let want = want_npy.data;
             let e = rel_l2(&got, &want);
             println!("{name}: rel_l2={e:.3e}");
-            if name == "l0_kcache" {
-                let npy = read_npy(&std::path::Path::new(&dir).join("m3_l0_k_rope_missing.npy"));
-                let _ = npy; // compare against numpy rope'd k below
-                continue;
-            }
             if name == "l0_attn" {
                 let win = read_npy(&std::path::Path::new(&dir).join("m3_l0_attn_win64.npy")).unwrap();
                 println!("l0_attn vs win64-numpy rel_l2={:.3e}", rel_l2(&got, &win.data));
@@ -661,5 +679,68 @@ mod m3_rope_tests {
         }
         println!("rope rel_l2={e:.3e}");
         assert!(e < 1e-5, "rope {e:.3e}");
+    }
+}
+
+#[cfg(test)]
+mod kv_write_tests {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::nn::kernel;
+    use crate::shaders;
+
+    #[test]
+    fn kv_write_micro() {
+        let gpu = Gpu::new().unwrap();
+        let k = kernel(&gpu, shaders::KV_WRITE, 1);
+        // 3 tokens x 128 values, row t filled with value (t+1)
+        let mut src = vec![0f32; 3 * 128];
+        for t in 0..3 {
+            for i in 0..128 {
+                src[t * 128 + i] = (t + 1) as f32;
+            }
+        }
+        let sb = gpu.upload_f32(&src, "src");
+        let cache = gpu.storage((2 * 512 * 64 * 4) as u64, "cache");
+        let mut u = [0u8; 16];
+        u[0..4].copy_from_slice(&0u32.to_le_bytes());  // pos_base
+        u[4..8].copy_from_slice(&512u32.to_le_bytes()); // cap
+        u[8..12].copy_from_slice(&2u32.to_le_bytes());  // n_kv
+        k.run(&gpu, &u, &[&sb], &cache, 3, 1);
+        let got = gpu.read_f32(&cache, 2 * 512 * 64).unwrap();
+        // position 0 -> 1.0, position 1 -> 2.0, position 2 -> 3.0
+        let p0 = got[(0 * 512 + 0) * 64];
+        let p1 = got[(0 * 512 + 1) * 64];
+        let p2 = got[(0 * 512 + 2) * 64];
+        let p1_h1 = got[(1 * 512 + 1) * 64];
+        println!("p0={p0} p1={p1} p2={p2} p1_h1={p1_h1} (want 1,2,3,2)");
+        assert!((p0 - 1.0).abs() < 1e-6 && (p1 - 2.0).abs() < 1e-6
+                && (p2 - 3.0).abs() < 1e-6 && (p1_h1 - 2.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod m3_fc3_tests {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::vae::VaeEncoder;
+    use crate::weights::Weights;
+
+    #[test]
+    fn fc3_path_bisect() {
+        let dir = std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
+        let wf = read_npy(&std::path::Path::new(&dir).join("m3_waveform.npy")).unwrap();
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let enc = VaeEncoder::load(gpu, &weights).unwrap();
+        let _ = enc.encode_params(&wf.data).unwrap();
+        for (name, got) in enc.take_bisect() {
+            let want_npy = read_npy(&std::path::Path::new(&dir)
+                .join(&format!("m3_{name}.npy"))).unwrap();
+            let e = rel_l2(&got, &want_npy.data);
+            println!("{name}: rel_l2={e:.3e} got[:3]={:?} want[:3]={:?}",
+                     &got[0..3], &want_npy.data[0..3]);
+        }
     }
 }

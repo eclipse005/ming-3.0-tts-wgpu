@@ -40,13 +40,6 @@ def enc_spy(waveform, waveform_length):
             nonlocal h
             h = out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
         l0 = enc_mod.encoder.layers[0]
-        orig_qkv = l0.self_attn.qkv_attention
-        def qkv_spy(q, k, v, past_key_values=None):
-            if "l0_q_rope" not in cap:
-                cap["l0_q_rope"] = q[0].detach().float().cpu().numpy()
-                cap["l0_k_rope"] = k[0].detach().float().cpu().numpy()
-            return orig_qkv(q, k, v, past_key_values=past_key_values)
-        l0.self_attn.qkv_attention = qkv_spy
         l0.self_attn.o_proj.register_forward_hook(
             lambda mod, i, o: cap.__setitem__("l0_attn", i[0][0].detach().float().cpu().numpy()))
         for nm in ("q_proj", "k_proj", "v_proj", "o_proj"):
@@ -57,8 +50,9 @@ def enc_spy(waveform, waveform_length):
                 (lambda nm: lambda mod, i, o: cap.__setitem__(f"l0_{nm}", o[0].detach().float().cpu().numpy()))(nm))
         l0.input_layernorm.register_forward_hook(
             lambda mod, i, o: cap.__setitem__("l0_attnln", o[0].detach().float().cpu().numpy()))
-        hooks = [l0.register_forward_hook(
-            lambda mod, i, o: cap.__setitem__("layer0", o[0].detach().float().cpu().numpy()))]
+        hooks = [enc_mod.encoder.layers[i].register_forward_hook(
+            (lambda i: lambda mod, inp, o: cap.__setitem__(f"layer{i}", o[0].detach().float().cpu().numpy()))(i))
+            for i in (0, 1, 2, 4, 8, 16, 23)]
         h = enc_mod.encoder(inputs_embeds=e).last_hidden_state
         for hk in hooks:
             hk.remove()
@@ -66,7 +60,13 @@ def enc_spy(waveform, waveform_length):
         a = enc_mod.pad_patch_insert_cls(h)
         a = enc_mod.aggregator(inputs_embeds=a).last_hidden_state
         cap["agg_out"] = a[0].detach().float().cpu().numpy()
+        # cls extraction: one cls row per (patch_size+1) group -> index [-1] on the ROW axis.
+        # NOTE: a.reshape(1,-1,5) would flatten the hidden dim into the group axis (old bug).
+        bsz, nrow, dim = a.size()
+        a = a.reshape(-1, 5, dim)[:, -1:, :].reshape(bsz, -1, dim)
+        cap["fc3_in"] = a[0].detach().float().cpu().numpy()
         o = enc_mod.fc3(a)
+        cap["fc3_out"] = o[0].detach().float().cpu().numpy()
         h2 = o.transpose(1, 2)
         mean, logvar = torch.chunk(h2, 2, dim=1)
         cap["mean"] = mean[0].detach().float().cpu().numpy().T
@@ -82,7 +82,7 @@ with torch.inference_mode():
 wf = cap["waveform"]
 print(f"waveform {wf.shape} len={cap['len']} frames={cap['frame_num']} "
       f"latent={cap['latent'].shape}")
-for k in ("waveform", "frames", "embeds", "l0_q_rope", "l0_k_rope", "l0_attnln", "l0_attn", "l0_q_proj", "l0_k_proj", "l0_v_proj", "l0_o_proj", "l0_gate_proj", "l0_up_proj", "l0_down_proj", "layer0", "enc_out", "agg_out", "mean", "std", "latent"):
+for k in sorted(cap.keys()):
     np.save(f"{OUT}/m3_{k}.npy", cap[k])
 np.save(f"{OUT}/m3_eps.npy",
         (cap["latent"] - cap["mean"]) / np.maximum(cap["std"], 1e-8))

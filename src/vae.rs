@@ -46,6 +46,8 @@ pub struct VaeEncoder {
     agg: Vec<QLayer>,
     cls: Buffer,
     fc3: Lin,
+    enc_norm: Buffer,
+    agg_norm: Buffer,
     cos_buf: Buffer,
     sin_buf: Buffer,
     k_rms: Kernel,
@@ -114,6 +116,8 @@ impl VaeEncoder {
             enc,
             agg,
             cls: gpu.upload_f32(&p("audio.encoder.cls_embed")?.to_f32()?, "cls"),
+            enc_norm: gpu.upload_f32(&p("audio.encoder.encoder.norm.weight")?.to_f32()?, "enorm"),
+            agg_norm: gpu.upload_f32(&p("audio.encoder.aggregator.norm.weight")?.to_f32()?, "agnorm"),
             fc3: lin("audio.encoder.fc3", 128, HIDDEN)?,
             cos_buf: gpu.upload_f32(&cos, "vae.cos"),
             sin_buf: gpu.upload_f32(&sin, "vae.sin"),
@@ -166,7 +170,8 @@ impl VaeEncoder {
             let v = self.mrow(&layer.v, &a, t)?;
             let ru = uni2(Q_HEADS as u32, 0);
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &q, t as u32, 1);
-            self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
+            let ruk = uni2(KV_HEADS as u32, 0);
+            self.k_rope.run(&self.gpu, &ruk, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
             let kc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.kc");
             let vc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.vc");
             let mut ku = [0u8; 16];
@@ -208,7 +213,9 @@ impl VaeEncoder {
 
     pub fn encode_stack_check(&self, embeds: &[f32], t: usize) -> Result<Vec<f32>> {
         let x = self.gpu.upload_f32(embeds, "v.e2");
-        self.gpu.read_f32(&self.stack(&self.enc, x, t)?, t * HIDDEN)
+        let h = self.stack(&self.enc, x, t)?;
+        let z = self.rms(&h, &self.enc_norm, t);
+        self.gpu.read_f32(&z, t * HIDDEN)
     }
 
     pub fn stack_range_check(&self, embeds: &[f32], t: usize, r: std::ops::Range<usize>) -> Result<Vec<f32>> {
@@ -221,7 +228,8 @@ impl VaeEncoder {
             let v = self.mrow(&layer.v, &a, t)?;
             let ru = uni2(Q_HEADS as u32, 0);
             self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &q, t as u32, 1);
-            self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
+            let ruk = uni2(KV_HEADS as u32, 0);
+            self.k_rope.run(&self.gpu, &ruk, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
             let kc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.kc");
             let vc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.vc");
             let mut ku = [0u8; 16];
@@ -272,7 +280,9 @@ impl VaeEncoder {
             seq[(p * 5 + 4) * HIDDEN..(p * 5 + 4) * HIDDEN + HIDDEN].copy_from_slice(&cls_host);
         }
         let seq_buf = self.gpu.upload_f32(&seq, "v.seq");
-        self.gpu.read_f32(&self.stack(&self.agg, seq_buf, padded * 5)?, padded * 5 * HIDDEN)
+        let a_raw = self.stack(&self.agg, seq_buf, p_count * 5)?;
+        let a = self.rms(&a_raw, &self.agg_norm, padded * 5);
+        self.gpu.read_f32(&a, p_count * 5 * HIDDEN)
     }
 
     /// Layer-0 sub-stage bisect (parity diagnostics).
@@ -288,8 +298,9 @@ impl VaeEncoder {
         out.push(("l0_k_proj".into(), self.gpu.read_f32(&k, t * (KV_HEADS * HEAD_DIM))?));
         out.push(("l0_v_proj".into(), self.gpu.read_f32(&v, t * (KV_HEADS * HEAD_DIM))?));
         let ru = uni2(Q_HEADS as u32, 0);
+        let ruk = uni2(KV_HEADS as u32, 0);
         self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &q, t as u32, 1);
-        self.k_rope.run(&self.gpu, &ru, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
+        self.k_rope.run(&self.gpu, &ruk, &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
         let kc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.kc");
         let vc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.vc");
         let mut ku = [0u8; 16];
@@ -298,6 +309,18 @@ impl VaeEncoder {
         ku[8..12].copy_from_slice(&(KV_HEADS as u32).to_le_bytes());
         self.k_kvwrite.run(&self.gpu, &ku, &[&k], &kc, t as u32, 1);
         self.k_kvwrite.run(&self.gpu, &ku, &[&v], &vc, t as u32, 1);
+        if std::env::var("MING_KV_TRACE").is_ok() {
+            let kch = self.gpu.read_f32(&kc, KV_HEADS * KV_CAP * HEAD_DIM)?;
+            let mut kk = vec![0f32; t * 128];
+            for pos in 0..t {
+                for h in 0..KV_HEADS {
+                    for d in 0..64 {
+                        kk[pos * 128 + h * 64 + d] = kch[(h * KV_CAP + pos) * 64 + d];
+                    }
+                }
+            }
+            out.push(("l0_kcache".into(), kk));
+        }
         let mut au = [0u8; 32];
         au[0..4].copy_from_slice(&(t as u32).to_le_bytes());
         au[4..8].copy_from_slice(&0u32.to_le_bytes());
@@ -306,6 +329,7 @@ impl VaeEncoder {
         au[16..20].copy_from_slice(&0u32.to_le_bytes());
         au[20..24].copy_from_slice(&((t - 1) as u32).to_le_bytes());
         au[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes());
+        au[28..32].copy_from_slice(&64u32.to_le_bytes()); // sliding window
         let attn = self.gpu.storage((t * HIDDEN * 4) as u64, "v.attn");
         self.k_attend.run(&self.gpu, &au, &[&q, &kc, &vc], &attn, Q_HEADS as u32, t as u32);
         let attn_host = self.gpu.read_f32(&attn, t * HIDDEN)?;
@@ -328,6 +352,8 @@ impl VaeEncoder {
 
     /// waveform -> (mean, std) gaussian parameters, shape [T_patch, 64] each.
     pub fn encode_params(&self, waveform: &[f32]) -> Result<(Vec<f32>, Vec<f32>, usize)> {
+        let mut out_vec: Vec<(String, Vec<f32>)> = Vec::new();
+        let _ = &out_vec;
         let n = waveform.len();
         let t_frames = (n + HOP - 1) / HOP;
         let mut frames = vec![0f32; t_frames * IN_DIM];
@@ -340,7 +366,8 @@ impl VaeEncoder {
         let x = self.gpu.upload_f32(&frames, "v.frames");
         let e1 = self.mrow(&self.fc1, &x, t_frames)?;
         let e2 = self.mrow(&self.fc2, &e1, t_frames)?;
-        let h = self.stack(&self.enc, e2, t_frames)?;
+        let h_raw = self.stack(&self.enc, e2, t_frames)?;
+        let h = self.rms(&h_raw, &self.enc_norm, t_frames);
 
         // patch + cls frontend: [P*5, 896]
         let h_host = self.gpu.read_f32(&h, t_frames * HIDDEN)?;
@@ -362,24 +389,42 @@ impl VaeEncoder {
             seq[(p * 5 + 4) * HIDDEN..(p * 5 + 4) * HIDDEN + HIDDEN].copy_from_slice(&cls_host);
         }
         let seq_buf = self.gpu.upload_f32(&seq, "v.seq");
-        let a = self.stack(&self.agg, seq_buf, padded * 5)?;
+        let a_raw = self.stack(&self.agg, seq_buf, p_count * 5)?;
+        let a = self.rms(&a_raw, &self.agg_norm, padded * 5);
 
         // extract cls positions (every 5th row, offset 4)
-        let a_host = self.gpu.read_f32(&a, padded * 5 * HIDDEN)?;
+        let a_host = self.gpu.read_f32(&a, p_count * 5 * HIDDEN)?;
         let mut cls_rows = vec![0f32; p_count * HIDDEN];
         for p in 0..p_count {
             cls_rows[p * HIDDEN..(p + 1) * HIDDEN].copy_from_slice(
                 &a_host[(p * 5 + 4) * HIDDEN..(p * 5 + 4) * HIDDEN + HIDDEN]);
         }
         let cr = self.gpu.upload_f32(&cls_rows, "v.clsrows");
+        out_vec.push(("fc3_in".into(), cls_rows.clone()));
         let out = self.mrow(&self.fc3, &cr, p_count)?;
         let flat = self.gpu.read_f32(&out, p_count * 128)?;
+        out_vec.push(("fc3_out".into(), flat.clone()));
         let mut mean = vec![0f32; p_count * 64];
         let mut std = vec![0f32; p_count * 64];
         for i in 0..p_count * 64 {
-            mean[i] = flat[2 * i];
-            std[i] = (flat[2 * i + 1] * 0.5).exp();
+            let row = i / 64;
+            let ch = i % 64;
+            mean[i] = flat[row * 128 + ch];
+            std[i] = (flat[row * 128 + 64 + ch] * 0.5).exp();
         }
+        out_vec.push(("mean".into(), mean.clone()));
+        out_vec.push(("std".into(), std.clone()));
+        BISECT_OUT.with(|c| *c.borrow_mut() = Some(out_vec.clone()));
         Ok((mean, std, p_count))
+    }
+}
+
+thread_local! {
+    static BISECT_OUT: std::cell::RefCell<Option<Vec<(String, Vec<f32>)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+impl VaeEncoder {
+    pub fn take_bisect(&self) -> Vec<(String, Vec<f32>)> {
+        BISECT_OUT.with(|c| c.borrow_mut().take()).unwrap_or_default()
     }
 }
