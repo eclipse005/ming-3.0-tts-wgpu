@@ -145,7 +145,7 @@ pub fn run(a: Args) -> Result<()> {
                 if !p.exists() {
                     break;
                 }
-                let npy = crate::parity::read_npy(&p)?;
+                let npy = crate::golden::read_npy(&p)?;
                 draws.push(npy.data);
             }
             println!("noise: {} golden draws from {dir}", draws.len());
@@ -159,7 +159,7 @@ pub fn run(a: Args) -> Result<()> {
     let mut prompt_latent: Option<(Vec<f32>, usize)> = None;
     let mut prompt_text = req.prompt_text.clone();
 
-    let mut zero_spk = a.use_zero_spk_emb;
+    let zero_spk = a.use_zero_spk_emb;
     if a.use_zero_spk_emb {
         // The reference still allocates one speaker slot; it is just zeroed
         // after the projection.
@@ -232,7 +232,6 @@ pub fn run(a: Args) -> Result<()> {
         None => None,
         Some(se) => {
             if zero_spk {
-                zero_spk = false;
                 Some(vec![0.0; 896])
             } else {
                 Some(pl.project_speaker(se)?)

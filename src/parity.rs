@@ -1,106 +1,22 @@
-//! Minimal .npy reader (numpy.save v1.0, C order) + rel_l2 metric + the M0
-//! single-layer parity tests against Python dumps.
+//! Parity tests against the Python reference dumps.
+//!
+//! Test-only: the reusable pieces (npy reader, rel_l2) live in `crate::golden`.
 
-use anyhow::{bail, Context, Result};
+#![allow(unused_imports)]
 
-pub struct Npy {
-    pub shape: Vec<usize>,
-    pub data: Vec<f32>,
-}
-
-pub fn read_npy(path: &std::path::Path) -> Result<Npy> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    if &bytes[0..6] != b"\x93NUMPY" {
-        bail!("not an npy file: {}", path.display());
-    }
-    let major = bytes[6];
-    let (hdr_len, off) = if major == 1 {
-        (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10)
-    } else {
-        (
-            u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize,
-            12,
-        )
-    };
-    let header = std::str::from_utf8(&bytes[off..off + hdr_len])?;
-    let descr = extract(header, "'descr': '")?;
-    let fortran = extract(header, "'fortran_order': ")?;
-    if fortran.trim() != "False" {
-        bail!("fortran-order npy not supported");
-    }
-    let shape = parse_shape(&extract(header, "'shape': (")?);
-    let dtype = match descr.as_str() {
-        "<f4" => D::F32,
-        "<f8" => D::F64,
-        "<i8" => D::I64,
-        "|b1" => D::Bool,
-        other => bail!("unsupported npy dtype {other}"),
-    };
-    let payload = &bytes[off + hdr_len..];
-    let data = match dtype {
-        D::F32 => payload
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect(),
-        D::F64 => payload
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32)
-            .collect(),
-        D::I64 => payload
-            .chunks_exact(8)
-            .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32)
-            .collect(),
-        D::Bool => payload.iter().map(|&b| b as f32).collect(),
-    };
-    Ok(Npy { shape, data })
-}
-
-enum D {
-    F32,
-    F64,
-    I64,
-    Bool,
-}
-
-fn extract<'a>(header: &'a str, key: &'a str) -> Result<String> {
-    let start = header
-        .find(key)
-        .with_context(|| format!("header missing {key}"))?
-        + key.len();
-    let rest = &header[start..];
-    let end = rest
-        .find(|c| c == ',' || c == '}')
-        .with_context(|| format!("unterminated {key}"))?;
-    Ok(rest[..end]
-        .trim()
-        .trim_matches('\'')
-        .trim_matches('"')
-        .to_string())
-}
-
-fn parse_shape(s: &str) -> Vec<usize> {
-    s.trim_end_matches(',')
-        .split(',')
-        .filter_map(|p| p.trim().parse::<usize>().ok())
-        .collect()
-}
-
-pub fn rel_l2(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    let mut num = 0.0f64;
-    let mut den = 0.0f64;
-    for (x, y) in a.iter().zip(b) {
-        let d = (*x - *y) as f64;
-        num += d * d;
-        den += (*y as f64) * (*y as f64);
-    }
-    (num.sqrt() / den.sqrt().max(1e-30)) as f32
-}
+use crate::golden::{read_npy, rel_l2, Npy};
+use anyhow::Result;
 
 fn model_dir() -> std::path::PathBuf {
     std::env::var("MING_MODEL")
         .unwrap_or_else(|_| "D:/Ming-3.0-tts/Ming-3.0-tts-0.5b".into())
         .into()
+}
+
+/// One shared kernel set per test (the engines no longer own their kernels).
+#[cfg(test)]
+fn ops_for(gpu: &crate::gpu::Gpu) -> std::sync::Arc<crate::ops::Ops> {
+    std::sync::Arc::new(crate::ops::Ops::new(gpu.clone()))
 }
 
 fn golden(name: &str) -> Result<crate::parity::Npy> {
@@ -258,7 +174,7 @@ mod m1_tests {
 
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
-        let mut eng = LlmEngine::load(gpu, &weights).unwrap();
+        let mut eng = LlmEngine::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
 
         // prefill
         let prob0 = eng.prefill(&pre.data, t).unwrap();
@@ -320,7 +236,7 @@ mod m2_tests {
 
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
-        let eng = DitEngine::load(gpu, &weights).unwrap();
+        let eng = DitEngine::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
 
         let mut worst = 0.0f32;
         let mut worst_i = 0usize;
@@ -371,7 +287,7 @@ mod m2_bisect_tests {
         let t = g("m2bisect_t_scalar.npy").data[0];
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
-        let eng = DitEngine::load(gpu, &weights).unwrap();
+        let eng = DitEngine::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
         let (temb, xn, xh, ce, b0, out) = eng.dit_forward_bisect(&x, t, &c, &lh).unwrap();
         let checks = [
             ("temb_mlp", temb, g("m2bisect_t_mlp.npy").data),
@@ -409,7 +325,7 @@ mod m2_trace_tests {
         let cfg = g("m2_cfg.npy").data;
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
-        let eng = DitEngine::load(gpu, &weights).unwrap();
+        let eng = DitEngine::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
         // trace the FIRST flowloss call (euler calls 0..10)
         let mut tr = Vec::new();
         let mut tp = Vec::new();
@@ -457,7 +373,7 @@ mod m2_cross_tests {
         let t = g("m2bisect_t_scalar.npy").data[0];
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
-        let eng = DitEngine::load(gpu, &weights).unwrap();
+        let eng = DitEngine::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
         let (_, _, _, _, _, via_bisect) = eng.dit_forward_bisect(&x, t, &c, &lh).unwrap();
         let via_fwd = eng.dit_forward(&x, t, &c, &lh).unwrap();
         let e = rel_l2(&via_fwd, &via_bisect);
@@ -483,7 +399,7 @@ mod m3_tests {
         let eps = golden("m3_eps.npy").unwrap();
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
-        let enc = VaeEncoder::load(gpu, &weights).unwrap();
+        let enc = VaeEncoder::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
         let (gm, gs, p) = enc.encode_params(&wf.data).unwrap();
         println!("patches={p} mean rel_l2={:.3e} std rel_l2={:.3e}",
                  rel_l2(&gm, &mean.data), rel_l2(&gs, &std.data));
@@ -533,7 +449,7 @@ mod m3_bisect_tests {
         assert!(rel_l2(&my_frames, &frames) < 1e-6, "frames");
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
-        let enc = VaeEncoder::load(gpu, &weights).unwrap();
+        let enc = VaeEncoder::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
         // stage 2: fc1+fc2
         let e = enc.embed_check(&my_frames, t_frames).unwrap();
         println!("embeds rel_l2={:.3e}", rel_l2(&e, &embeds));
@@ -583,7 +499,7 @@ mod m3_layer0_tests {
         let t = embeds.len() / 896;
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
-        let enc = VaeEncoder::load(gpu, &weights).unwrap();
+        let enc = VaeEncoder::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
         let dir = std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
         for (name, got) in enc.layer0_parts_check(&embeds, t).unwrap() {
@@ -733,7 +649,7 @@ mod m3_fc3_tests {
         let wf = read_npy(&std::path::Path::new(&dir).join("m3_waveform.npy")).unwrap();
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
-        let enc = VaeEncoder::load(gpu, &weights).unwrap();
+        let enc = VaeEncoder::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
         let _ = enc.encode_params(&wf.data).unwrap();
         for (name, got) in enc.take_bisect() {
             let want_npy = read_npy(&std::path::Path::new(&dir)
@@ -763,7 +679,7 @@ mod m4_tests {
         let wav = golden("m4_waveform.npy").unwrap();
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
-        let d = VaeDecoder::load(gpu, &weights).unwrap();
+        let d = VaeDecoder::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
         let t_lat = latent.shape[0];
 
         let f = d.fc1_check(&latent.data, t_lat).unwrap();
@@ -914,7 +830,7 @@ mod microbench2 {
     fn device_path_vs_sync() {
         let gpu = Gpu::new().unwrap();
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
-        let dit = crate::dit::DitEngine::load(gpu.clone(), &weights).unwrap();
+        let dit = crate::dit::DitEngine::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
         let x = vec![0.01f32; 64];
         let c = vec![0.02f32; 896];
         let lh = vec![0.03f32; 64];

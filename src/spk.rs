@@ -19,6 +19,10 @@
 //! `load-dynamic` and the DLL is located at run time (see
 //! `resolve_onnxruntime_dylib`). Set `ORT_DYLIB_PATH` to override.
 
+// Parts of this module are exercised only by the parity tests (they read
+// goldens) or kept as public API; the release binary does not call them.
+#![allow(dead_code)]
+
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

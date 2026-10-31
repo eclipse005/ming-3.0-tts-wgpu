@@ -1,6 +1,6 @@
 //! wgpu device setup and buffer helpers (lean port of the qwen3-asr-wgpu patterns).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::cell::RefCell;
 use wgpu::{Backends, Buffer, BufferUsages, Device, Instance, Queue};
 
@@ -10,7 +10,10 @@ use wgpu::{Backends, Buffer, BufferUsages, Device, Instance, Queue};
 pub struct Gpu {
     pub device: Device,
     pub queue: Queue,
+    /// Informational, printed by `devices` and useful in logs.
+    #[allow(dead_code)]
     pub adapter_name: String,
+    #[allow(dead_code)]
     pub backend: &'static str,
     /// Dispatch batching. Every kernel launch used to create its own command
     /// encoder and submit it, which is thousands of WDDM submissions per
@@ -19,16 +22,29 @@ pub struct Gpu {
     /// the next synchronisation point (a readback) or when it grows large.
     dispatches: std::sync::Arc<RefCell<Vec<PendingDispatch>>>,
     pending_count: std::sync::Arc<std::cell::Cell<usize>>,
+    /// One upload buffer for every dispatch's uniform block. Each recorded
+    /// dispatch owns a 256-byte slot and the whole thing is uploaded once per
+    /// flush; that is the only way to keep per-dispatch uniforms *and* a
+    /// deferred submission, because Queue::write_buffer would otherwise land
+    /// before the batch it is supposed to configure.
+    arena: Buffer,
+    arena_host: std::sync::Arc<RefCell<Vec<u8>>>,
+    arena_used: std::sync::Arc<std::cell::Cell<usize>>,
 }
 
 struct PendingDispatch {
     pipeline: wgpu::ComputePipeline,
     bind: wgpu::BindGroup,
+    uniform_offset: u32,
     wgs_x: u32,
     wgs_y: u32,
 }
 
-const MAX_PENDING: usize = 512;
+/// Uniform slots are 256 B: the guaranteed minUniformBufferOffsetAlignment.
+pub const UNIFORM_SLOT: usize = 256;
+const ARENA_SLOTS: usize = 4096;
+
+const MAX_PENDING: usize = 2048;
 
 fn max_pending() -> usize {
     std::env::var("MING_MAX_PENDING")
@@ -95,6 +111,12 @@ impl Gpu {
             wgpu::Backend::Dx12 => "dx12",
             _ => "other",
         };
+        let arena = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("uniform arena"),
+            size: (UNIFORM_SLOT * ARENA_SLOTS) as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Ok(Self {
             device,
             queue,
@@ -102,6 +124,9 @@ impl Gpu {
             backend,
             dispatches: std::sync::Arc::new(RefCell::new(Vec::new())),
             pending_count: std::sync::Arc::new(std::cell::Cell::new(0)),
+            arena,
+            arena_host: std::sync::Arc::new(RefCell::new(Vec::new())),
+            arena_used: std::sync::Arc::new(std::cell::Cell::new(0)),
         })
     }
 
@@ -159,18 +184,13 @@ impl Gpu {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             tx.send(r).ok();
         });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely());
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv()
             .map_err(|e| anyhow::anyhow!("map channel: {e}"))?
             .map_err(|e| anyhow::anyhow!("map failed: {e}"))?;
         let out = bytemuck::cast_slice(&slice.get_mapped_range()?).to_vec();
         stage.unmap();
         Ok(out)
-    }
-
-    pub fn run(&self, pipeline: &wgpu::ComputePipeline, bind: &wgpu::BindGroup, wgs: u32) {
-        self.run2d(pipeline, bind, wgs, 1);
     }
 
     /// Record a dispatch into the pending batch.
@@ -182,7 +202,42 @@ impl Gpu {
     /// the same launch-latency problem the CUDA build solved with CUDA graphs.
     /// WebGPU guarantees each dispatch sees the previous one's writes, so the
     /// ordering is preserved.
+    /// Reserve a uniform slot, copying the bytes into the arena's host staging
+    /// area. Returns the byte offset to pass as a dynamic bind-group offset.
+    pub fn alloc_uniform(&self, data: &[u8]) -> u32 {
+        if data.len() > UNIFORM_SLOT {
+            panic!("uniform block of {} B exceeds the {UNIFORM_SLOT} B slot", data.len());
+        }
+        let mut used = self.arena_used.get();
+        if used + UNIFORM_SLOT > UNIFORM_SLOT * ARENA_SLOTS {
+            self.flush();
+            used = 0;
+        }
+        let mut host = self.arena_host.borrow_mut();
+        if host.len() < used + UNIFORM_SLOT {
+            host.resize(used + UNIFORM_SLOT, 0);
+        }
+        host[used..used + data.len()].copy_from_slice(data);
+        for b in &mut host[used + data.len()..used + UNIFORM_SLOT] {
+            *b = 0;
+        }
+        self.arena_used.set(used + UNIFORM_SLOT);
+        used as u32
+    }
+
+    pub fn arena_buffer(&self) -> &Buffer {
+        &self.arena
+    }
+
     pub fn flush(&self) {
+        // Upload every uniform written since the last flush in one go, before
+        // the batch that reads them is submitted.
+        let used = self.arena_used.get();
+        if used > 0 {
+            let host = self.arena_host.borrow();
+            self.queue.write_buffer(&self.arena, 0, &host[..used]);
+        }
+        self.arena_used.set(0);
         let mut dq = self.dispatches.borrow_mut();
         if dq.is_empty() {
             return;
@@ -197,7 +252,7 @@ impl Gpu {
             });
             for d in dq.iter() {
                 pass.set_pipeline(&d.pipeline);
-                pass.set_bind_group(0, &d.bind, &[]);
+                pass.set_bind_group(0, &d.bind, &[d.uniform_offset]);
                 pass.dispatch_workgroups(d.wgs_x, d.wgs_y, 1);
             }
         }
@@ -210,6 +265,7 @@ impl Gpu {
         &self,
         pipeline: &wgpu::ComputePipeline,
         bind: &wgpu::BindGroup,
+        uniform_offset: u32,
         wgs_x: u32,
         wgs_y: u32,
     ) {
@@ -218,6 +274,7 @@ impl Gpu {
             dq.push(PendingDispatch {
                 pipeline: pipeline.clone(),
                 bind: bind.clone(),
+                uniform_offset,
                 wgs_x,
                 wgs_y,
             });
@@ -227,11 +284,5 @@ impl Gpu {
         if n % max_pending() == 0 {
             self.flush();
         }
-    }}
-
-pub fn assert_f32_multiple(n: usize) -> Result<()> {
-    if n % 4 != 0 {
-        bail!("f32 count {n} not word-multiple");
     }
-    Ok(())
 }

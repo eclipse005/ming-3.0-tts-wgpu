@@ -9,9 +9,12 @@ use clap::{Parser, Subcommand};
 
 mod audio;
 mod dit;
+mod golden;
 mod gpu;
 mod istft;
 mod nn;
+mod ops;
+#[cfg(test)]
 mod parity;
 mod pipeline;
 mod qwen_lm;

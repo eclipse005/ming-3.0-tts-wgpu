@@ -8,6 +8,10 @@
 //! So the pinned ids are asserted at load time and the layout is built here
 //! rather than in every caller.
 
+// Parts of this module are exercised only by the parity tests (they read
+// goldens) or kept as public API; the release binary does not call them.
+#![allow(dead_code)]
+
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 

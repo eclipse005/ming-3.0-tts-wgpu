@@ -5,57 +5,47 @@
 //! Same geometry as the encoder, so the M1/M3 kernel family is reused; the
 //! only new piece is the CPU iSTFT (istft.rs).
 
+// Parts of this module are exercised only by the parity tests (they read
+// goldens) or kept as public API; the release binary does not call them.
+#![allow(dead_code)]
+
 use crate::gpu::Gpu;
 use crate::istft::Istft;
-use crate::nn::{kernel, Kernel};
+use crate::ops::{AttendParams, Lin, Ops, QwenLayer, RopeTables};
 use crate::qwen_lm::{HEAD_DIM, HIDDEN, KV_CAP, KV_HEADS, Q_HEADS, ROPE_THETA};
-use crate::shaders;
-use crate::vae::{uni2, Lin, QLayer};
 use crate::weights::Weights;
 use anyhow::Result;
 use rustfft::num_complex::Complex32;
+use std::sync::Arc;
 use wgpu::Buffer;
 
 const DEC_LAYERS: usize = 24;
 const LATENT_DIM: usize = 64;
 const UPSAMPLE: usize = 4;
 const MLP_DIM: usize = 4864;
-const EPS: f32 = 1e-6;
 const WINDOW: u32 = 64;
 
 pub struct VaeDecoder {
     gpu: Gpu,
     fc1: Lin,
-    dec: Vec<QLayer>,
+    dec: Vec<QwenLayer>,
     dec_norm: Buffer,
     head: Lin,
     istft: Istft,
-    cos_buf: Buffer,
-    sin_buf: Buffer,
-    k_rms: Kernel,
-    k_mrow: Kernel,
-    k_rope: Kernel,
-    k_attend: Kernel,
-    k_silu: Kernel,
-    k_add: Kernel,
-    k_kvwrite: Kernel,
+    rope: RopeTables,
+    kv_k: Buffer,
+    kv_v: Buffer,
+    ops: Arc<Ops>,
 }
 
 impl VaeDecoder {
-    pub fn load(gpu: Gpu, w: &Weights) -> Result<Self> {
+    pub fn load(gpu: Gpu, ops: Arc<Ops>, w: &Weights) -> Result<Self> {
         let p = |name: &str| w.get(name);
         let lin = |base: &str, rows: usize, inf: usize| -> Result<Lin> {
-            let wt = p(&format!("{base}.weight"))?;
-            let packed = wt.to_bf16_packed_u32()?;
-            let wbuf = gpu.upload_u32(&packed, "dec.w");
-            let bbuf = match p(&format!("{base}.bias")) {
-                Ok(bt) => gpu.upload_f32(&bt.to_f32()?, "dec.b"),
-                Err(_) => gpu.upload_f32(&vec![0.0; rows], "dec.b0"),
-            };
-            Ok(Lin { w: wbuf, b: bbuf, rows, in_features: inf })
+            Lin::load(&gpu, w, base, rows, inf)
         };
-        let qlayer = |base: &str| -> Result<QLayer> {
-            Ok(QLayer {
+        let qlayer = |base: &str| -> Result<QwenLayer> {
+            Ok(QwenLayer {
                 q: lin(&format!("{base}.self_attn.q_proj"), HIDDEN, HIDDEN)?,
                 k: lin(&format!("{base}.self_attn.k_proj"), KV_HEADS * HEAD_DIM, HIDDEN)?,
                 v: lin(&format!("{base}.self_attn.v_proj"), KV_HEADS * HEAD_DIM, HIDDEN)?,
@@ -70,14 +60,7 @@ impl VaeDecoder {
         let dec = (0..DEC_LAYERS)
             .map(|i| qlayer(&format!("audio.decoder.decoder.layers.{i}")))
             .collect::<Result<Vec<_>>>()?;
-        let (mut cos, mut sin) = (vec![0f32; KV_CAP * 32], vec![0f32; KV_CAP * 32]);
-        for pos in 0..KV_CAP {
-            for i in 0..32 {
-                let freq = ROPE_THETA.powf((2 * i) as f64 / 64.0).recip();
-                cos[pos * 32 + i] = (pos as f64 * freq).cos() as f32;
-                sin[pos * 32 + i] = (pos as f64 * freq).sin() as f32;
-            }
-        }
+        let rope = RopeTables::new(&gpu, ROPE_THETA, HEAD_DIM, KV_CAP);
         let n_fft = 4 * 882;
         let win = p("audio.decoder.head.istft.window")?.to_f32()?;
         Ok(Self {
@@ -86,15 +69,10 @@ impl VaeDecoder {
             dec_norm: gpu.upload_f32(&p("audio.decoder.decoder.norm.weight")?.to_f32()?, "dec.norm"),
             head: lin("audio.decoder.head.out", n_fft + 2, HIDDEN)?,
             istft: Istft::new(n_fft, 882, win),
-            cos_buf: gpu.upload_f32(&cos, "dec.cos"),
-            sin_buf: gpu.upload_f32(&sin, "dec.sin"),
-            k_rms: kernel(&gpu, shaders::RMSNORM, 2),
-            k_mrow: kernel(&gpu, shaders::GEMV_MROW, 3),
-            k_rope: kernel(&gpu, shaders::ROPE, 2),
-            k_attend: kernel(&gpu, shaders::ATTEND, 3),
-            k_silu: kernel(&gpu, shaders::SILU_MUL, 2),
-            k_add: kernel(&gpu, shaders::ADD, 2),
-            k_kvwrite: kernel(&gpu, shaders::KV_WRITE, 1),
+            rope,
+            kv_k: gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "dec.kv_k"),
+            kv_v: gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "dec.kv_v"),
+            ops,
             gpu,
         })
     }
@@ -109,66 +87,43 @@ impl VaeDecoder {
     }
 
     fn rms(&self, x: &Buffer, w: &Buffer, rows: usize) -> Buffer {
-        let y = self.gpu.storage((rows * HIDDEN * 4) as u64, "dec.rms");
-        self.k_rms.run(&self.gpu, &uni2(HIDDEN as u32, EPS.to_bits()), &[x, w], &y,
-                       rows as u32, 1);
-        y
+        self.ops.rms(x, w, rows, HIDDEN)
     }
 
     fn mrow(&self, lin: &Lin, x: &Buffer, t: usize) -> Result<Buffer> {
-        let y = self.gpu.storage((t * lin.rows * 4) as u64, "dec.mrow");
-        self.k_mrow.run(&self.gpu,
-                        &uni2(lin.rows as u32, (lin.in_features / 2) as u32),
-                        &[&lin.w, x, &lin.b], &y,
-                        ((lin.rows + 7) / 8) as u32, t as u32);
-        Ok(y)
+        self.ops.linear(lin, x, t)
     }
 
     fn silu_mul(&self, g: &Buffer, u: &Buffer, n: usize) -> Buffer {
-        let y = self.gpu.storage((n * 4) as u64, "dec.silu");
-        self.k_silu.run(&self.gpu, &crate::vae::uni1(n as u32), &[g, u], &y,
-                        ((n + 255) / 256) as u32, 1);
-        y
+        self.ops.silu_mul(g, u, n)
     }
 
     fn add(&self, a: &Buffer, b: &Buffer, n: usize) -> Buffer {
-        let y = self.gpu.storage((n * 4) as u64, "dec.add");
-        self.k_add.run(&self.gpu, &crate::vae::uni1(n as u32), &[a, b], &y,
-                       ((n + 255) / 256) as u32, 1);
-        y
+        self.ops.add(a, b, n)
     }
 
     /// Causal Qwen2 stack with sliding window 64 over t tokens at positions 0..t.
-    fn stack(&self, layers: &[QLayer], x: Buffer, t: usize) -> Result<Buffer> {
+    fn stack(&self, layers: &[QwenLayer], x: Buffer, t: usize) -> Result<Buffer> {
         let mut h = x;
         for layer in layers {
             let a = self.rms(&h, &layer.n1, t);
             let q = self.mrow(&layer.q, &a, t)?;
             let k = self.mrow(&layer.k, &a, t)?;
             let v = self.mrow(&layer.v, &a, t)?;
-            self.k_rope.run(&self.gpu, &uni2(Q_HEADS as u32, 0),
-                            &[&self.cos_buf, &self.sin_buf], &q, t as u32, 1);
-            self.k_rope.run(&self.gpu, &uni2(KV_HEADS as u32, 0),
-                            &[&self.cos_buf, &self.sin_buf], &k, t as u32, 1);
-            let kc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "dec.kc");
-            let vc = self.gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "dec.vc");
-            let mut ku = [0u8; 16];
-            ku[0..4].copy_from_slice(&0u32.to_le_bytes());
-            ku[4..8].copy_from_slice(&(KV_CAP as u32).to_le_bytes());
-            ku[8..12].copy_from_slice(&(KV_HEADS as u32).to_le_bytes());
-            self.k_kvwrite.run(&self.gpu, &ku, &[&k], &kc, t as u32, 1);
-            self.k_kvwrite.run(&self.gpu, &ku, &[&v], &vc, t as u32, 1);
-            let mut au = [0u8; 32];
-            au[0..4].copy_from_slice(&(t as u32).to_le_bytes());
-            au[4..8].copy_from_slice(&0u32.to_le_bytes());
-            au[8..12].copy_from_slice(&((Q_HEADS / KV_HEADS) as u32).to_le_bytes());
-            au[12..16].copy_from_slice(&(1.0f32 / (HEAD_DIM as f32).sqrt()).to_le_bytes());
-            au[16..20].copy_from_slice(&0u32.to_le_bytes());
-            au[20..24].copy_from_slice(&0u32.to_le_bytes());
-            au[24..28].copy_from_slice(&(HIDDEN as u32).to_le_bytes());
-            au[28..32].copy_from_slice(&WINDOW.to_le_bytes());
-            let attn = self.gpu.storage((t * HIDDEN * 4) as u64, "dec.attn");
-            self.k_attend.run(&self.gpu, &au, &[&q, &kc, &vc], &attn, Q_HEADS as u32, t as u32);
+            self.ops.rope(&self.rope, &q, Q_HEADS, 0, 0, t);
+            self.ops.rope(&self.rope, &k, KV_HEADS, 0, 0, t);
+            let kc = &self.kv_k;
+            let vc = &self.kv_v;
+            self.ops.kv_write(&k, kc, t, 0, KV_CAP, KV_HEADS);
+            self.ops.kv_write(&v, vc, t, 0, KV_CAP, KV_HEADS);
+            let attn = self.ops.attend(
+                &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN)
+                .with_window(WINDOW as usize),
+                &q,
+                kc,
+                vc,
+                Q_HEADS,
+            );
             let o = self.mrow(&layer.o, &attn, t)?;
             h = self.add(&h, &o, t * HIDDEN);
             let a2 = self.rms(&h, &layer.n2, t);

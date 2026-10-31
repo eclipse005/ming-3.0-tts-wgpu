@@ -4,6 +4,10 @@
 //! bf16 -> f32 is a lossless 16-bit shift, done inside shaders, so the math
 //! matches the Python fp32 path exactly while halving bus traffic.
 
+// Parts of this module are exercised only by the parity tests (they read
+// goldens) or kept as public API; the release binary does not call them.
+#![allow(dead_code)]
+
 use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
 use safetensors::SafeTensors;

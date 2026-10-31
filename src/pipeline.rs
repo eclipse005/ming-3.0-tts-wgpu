@@ -8,12 +8,12 @@
 
 use crate::dit::DitEngine;
 use crate::gpu::Gpu;
-use crate::qwen_lm::{LlmEngine, HIDDEN};
+use crate::qwen_lm::LlmEngine;
 use crate::vae::VaeEncoder;
 use crate::vae_dec::VaeDecoder;
 use crate::weights::{bf16_widen, Weights};
 use wgpu::Buffer;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::path::Path;
 
 pub const LATENT_DIM: usize = 64;
@@ -143,10 +143,13 @@ pub struct Pipeline {
 
 /// Trace of one decode loop, kept for parity assertions.
 pub struct LoopTrace {
+    /// Per-step hidden states and stop probabilities: kept for the parity test.
+    #[allow(dead_code)]
+    pub z_steps: Vec<Vec<f32>>,
+    #[allow(dead_code)]
+    pub stop_probs: Vec<f32>,
     pub latents: Vec<f32>,
     pub n_latents: usize,
-    pub z_steps: Vec<Vec<f32>>,
-    pub stop_probs: Vec<f32>,
     pub stopped_at: Option<usize>,
 }
 
@@ -154,11 +157,13 @@ impl Pipeline {
     pub fn load(model_dir: &Path, with_encoder: bool) -> Result<Self> {
         let w = Weights::load(&model_dir.join("model.safetensors"))?;
         let gpu = Gpu::new()?;
-        let llm = LlmEngine::load(gpu.clone(), &w)?;
-        let dit = DitEngine::load(gpu.clone(), &w)?;
-        let dec = VaeDecoder::load(gpu.clone(), &w)?;
+        // One compiled kernel set and one device for every stage.
+        let ops = std::sync::Arc::new(crate::ops::Ops::new(gpu.clone()));
+        let llm = LlmEngine::load(gpu.clone(), ops.clone(), &w)?;
+        let dit = DitEngine::load(gpu.clone(), ops.clone(), &w)?;
+        let dec = VaeDecoder::load(gpu.clone(), ops.clone(), &w)?;
         let enc = if with_encoder {
-            Some(VaeEncoder::load(gpu.clone(), &w)?)
+            Some(VaeEncoder::load(gpu.clone(), ops.clone(), &w)?)
         } else {
             None
         };
@@ -167,6 +172,7 @@ impl Pipeline {
             "spk.w",
         );
         let spk_b = gpu.upload_f32(&w.get("spk_head.bias")?.to_f32()?, "spk.b");
+        let _ = ops;
         Ok(Self { gpu, w, llm, dit, dec, enc, spk_w, spk_b })
     }
 
@@ -315,10 +321,4 @@ impl Pipeline {
         let end = (index as usize * frame + frame + tail).min(speech.len());
         speech[..end].to_vec()
     }
-}
-
-/// Convenience for callers that only have a model dir.
-pub fn load(model_dir: &str, with_encoder: bool) -> Result<Pipeline> {
-    Pipeline::load(Path::new(model_dir), with_encoder)
-        .with_context(|| format!("load pipeline from {model_dir}"))
 }
