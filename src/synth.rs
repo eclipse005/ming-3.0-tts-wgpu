@@ -199,7 +199,7 @@ pub fn run(a: Args) -> Result<()> {
             }
             at_44k.extend_from_slice(&if r != 44100 { audio::resample(&x, r, 44100) } else { x });
         }
-        let mut all = at_44k;
+        let all = at_44k;
 
         if a.use_spk_emb && spk_emb.is_none() {
             let onnx = model_dir.join("campplus.onnx");
