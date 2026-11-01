@@ -179,7 +179,12 @@ pub fn run(a: Args) -> Result<()> {
     let fragments = prepare_text(&tok, &req, &a)?;
     let reference_first_fragment = req.taskname == "STYLE" && fragments.len() > 1;
     let needs_encoder = need_prompt || reference_first_fragment;
+    let mem = std::env::var("MING_MEM").is_ok();
     let mut pl = Pipeline::load(model_dir, needs_encoder)?;
+    if mem {
+        let (cum, peak) = pl.gpu.mem_stats();
+        println!("  mem load      : cumulative {:.1} MiB, peak window {:.1} MiB", cum as f64 / 1048576.0, peak as f64 / 1048576.0);
+    }
 
     if !a.prompt_wav_path.is_empty() {
         // The reference resamples each prompt wav once, from its NATIVE rate:
@@ -285,6 +290,7 @@ pub fn run(a: Args) -> Result<()> {
 
         let t = layout.input_ids.len();
         let t0 = std::time::Instant::now();
+        let before = pl.gpu.mem_stats().0;
         let trace = pl.decode_loop(
             &embeds,
             t,
@@ -300,7 +306,26 @@ pub fn run(a: Args) -> Result<()> {
             t0.elapsed(),
             trace.stopped_at
         );
+        let (cum_loop, peak_loop) = pl.gpu.mem_stats();
+        if mem {
+            println!(
+                "  mem decode    : {:.1} MiB allocated for {} latents, peak window {:.1} MiB",
+                (cum_loop - before) as f64 / 1048576.0,
+                trace.n_latents,
+                peak_loop as f64 / 1048576.0
+            );
+        }
+        let before_vae = cum_loop;
         let mut wav = pl.vocode(&trace.latents, trace.n_latents)?;
+        if mem {
+            let (cum_vae, peak_vae) = pl.gpu.mem_stats();
+            println!(
+                "  mem vae-decode: {:.1} MiB allocated for {} frames, peak window {:.1} MiB",
+                (cum_vae - before_vae) as f64 / 1048576.0,
+                trace.n_latents * 4,
+                peak_vae as f64 / 1048576.0
+            );
+        }
         if !a.no_trim_silence {
             wav = Pipeline::trim_trailing_silence(&wav, 44100);
         }

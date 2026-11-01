@@ -84,6 +84,7 @@ cargo test --release -- --test-threads=1
 | 环境变量 | 作用 |
 |---|---|
 | `MING_PROFILE=1` | 打印 prefill / DiT / LLM+agg 分段耗时 |
+| `MING_MEM=1` | 打印每阶段的显存申请量（累计 + flush 窗口峰值），见 4.9 |
 | `MING_NOISE_GOLDEN=<dir>` | 注入金标 torch.randn 抽样（`goldens/m5/` 或 `goldens/m5_params/<case>/`），用于逐样本对拍 |
 | `MING_DUMP_IDS=<file>` | 把首条分片的 token id 写盘，用于和参考的 `build_input_ids` 比 |
 | `MING_MAX_PENDING=<n>` | 一次提交的 dispatch 上限（默认 2048） |
@@ -312,6 +313,27 @@ GELU 用 erf 而不是 tanh 那件事仍然成立（每元素差 1e-3，是真�
 修完的验证：`vae_decodes_past_the_llm_window`（160 latents = 640 帧 = 12.8 s，门限 1e-4，实测 **2.9e-6**）、`vae_encodes_past_the_llm_window`（12 s 参考 = 600 帧，实测 **1.2e-6**）、`long_prompt_prefill_matches_python`（65 / 88 / 161 token 的 prefill，实测 7e-7 / 8e-7 / 1e-6）。
 
 > **文本规范化（TN）的现状**：参考实现走 pynini/WeTextProcessing 的 FST，而本机 videolingo 环境里**没有 pynini**（RUN_LOCAL.md 第 13 行），所以 `infer.py` 只要不带 `--no_text_normalization` 就会在第一个分片上抛 `ModuleNotFoundError`；36 例和本文所有对拍都是带 `--no_text_normalization` 跑的。移植版实现的是 pynini 之后的那一步 `normalize_text_kit`，所以**带数字/符号的文本一旦开 TN，两边没有可比的基准**——这是 P2 的功能缺口，不是回归。
+
+### 4.9 显存随生成时长怎么涨（量过，别再猜）
+
+`MING_MEM=1` 会打印每个阶段向 `device.create_buffer` 申请了多少字节，以及一次 flush 窗口内的峰值（flush 之后上一批 recording 才能回收，所以窗口峰值 ≈ 该阶段的显存峰值）。单段实测（P104-100，权重常驻 1782 MiB）：
+
+| 场景 | 采样阶段峰值 | 采样阶段累计申请 | VAE 解码累计 | **整体峰值** |
+|---|---|---|---|---|
+| 3.2 s 单段（40 latents） | 1869 MiB | 1603 MiB | 328 MiB | **1869 MiB** |
+| 8.8 s 单段（110） | 1913 MiB | 4307 MiB | 902 MiB | **1913 MiB** |
+| 23.2 s 单段（291） | 2107 MiB | 11377 MiB | 2390 MiB | **2373 MiB** |
+| 21.6 s **分 6 片** | 1873 MiB | 每片 1.3–2.6 GiB | 每片 262–550 MiB | **1873 MiB** |
+
+两条完全不同的规律：
+
+1. **LLM + DiT 采样阶段：显存不随时长增长。** 每个 decode step 会申请约 39 MiB 临时 buffer（291 步 = 11 GiB 累计申请），但它们活到下一次 `flush()` 就被回收；flush 每 2048 个 dispatch（约 3 步）发生一次，所以窗口峰值恒定在 ~1.9 GB。**时长只影响累计申请量（≈39 MiB/latent ≈ 0.49 GB/秒音频），不影响驻留量。**
+
+2. **VAE 解码阶段：显存随音频时长线性增长。** 解码器是“整段一次过”（与参考实现一致），24 层的中间 buffer 全部在同一次 flush 之前申请完，所以 ≈ **2.05 MiB/帧 = 102 MiB/秒音频**，一帧都不回收。23.2 s 单段就是 2.39 GB —— 这一阶段的峰值第一次超过了采样窗口。
+
+两条线的交点约 **18.6 s**：短于它，峰值 1.9 GB（权重 + 采样窗口）；长于它，峰值 ≈ 0.102 GB × 音频秒数。单段最多受 512-token 预算限制在 ~37 s，对应 ~3.8 GB，8 GB 卡够用；**分片能把它压平**（21.6 s 分 6 片，每片单独解码，峰值 1873 MiB，与 3.2 s 单段相同）——这是默认 `max_length=24` 的另一个好处。
+
+给 RTF / 批处理优化的提示：pred/null 合批不会让驻留量明显上涨（窗口仍由 flush 控制）；但如果要改“一次 flush 里塞更多 dispatch”，窗口峰值会跟着涨。想让长单段的 VAE 峰值消失，得做分块解码（参考实现的 streaming `use_cache=True` 路径，用 `stream_state` 复用窗口）。
 
 ### 4.5 性能（release，P104-100，A1_bare：40 步 / 3.2 s 音频）
 

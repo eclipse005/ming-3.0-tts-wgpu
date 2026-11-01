@@ -30,6 +30,14 @@ pub struct Gpu {
     arena: Buffer,
     arena_host: std::sync::Arc<RefCell<Vec<u8>>>,
     arena_used: std::sync::Arc<std::cell::Cell<usize>>,
+    /// Bytes handed to `device.create_buffer` so far, and the largest amount
+    /// created between two flushes (a flush is what lets the previous wave of
+    /// recordings -- and therefore their buffers -- go). `MING_MEM=1` prints
+    /// both: the first is "what the pipeline asked for", the second is a good
+    /// proxy for the peak live set of one stage.
+    alloc_bytes: std::sync::Arc<std::cell::Cell<u64>>,
+    alloc_since_flush: std::sync::Arc<std::cell::Cell<u64>>,
+    peak_window: std::sync::Arc<std::cell::Cell<u64>>,
 }
 
 struct PendingDispatch {
@@ -145,16 +153,27 @@ impl Gpu {
             arena,
             arena_host: std::sync::Arc::new(RefCell::new(Vec::new())),
             arena_used: std::sync::Arc::new(std::cell::Cell::new(0)),
+            alloc_bytes: std::sync::Arc::new(std::cell::Cell::new(0)),
+            alloc_since_flush: std::sync::Arc::new(std::cell::Cell::new(0)),
+            peak_window: std::sync::Arc::new(std::cell::Cell::new(0)),
         })
     }
 
     pub fn buffer(&self, size: u64, usage: BufferUsages, label: &str) -> Buffer {
+        self.alloc_bytes.set(self.alloc_bytes.get() + size);
+        self.alloc_since_flush
+            .set(self.alloc_since_flush.get() + size);
         self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: size.max(1),
             usage,
             mapped_at_creation: false,
         })
+    }
+
+    /// (cumulative bytes, peak bytes allocated in one flush window).
+    pub fn mem_stats(&self) -> (u64, u64) {
+        (self.alloc_bytes.get(), self.peak_window.get())
     }
 
     pub fn storage(&self, size: u64, label: &str) -> Buffer {
@@ -256,6 +275,13 @@ impl Gpu {
             self.queue.write_buffer(&self.arena, 0, &host[..used]);
         }
         self.arena_used.set(0);
+        // Everything recorded since the previous flush is about to become
+        // recyclable, so this is the point where the live set peaks.
+        let window = self.alloc_since_flush.get();
+        if window > self.peak_window.get() {
+            self.peak_window.set(window);
+        }
+        self.alloc_since_flush.set(0);
         let mut dq = self.dispatches.borrow_mut();
         if dq.is_empty() {
             return;
