@@ -385,6 +385,229 @@ fn main(
 }
 "#;
 
+/// Single-token linear with vec4 weight loads (minimal form, no unrolling).
+///
+/// One warp per row; a granule is 8 bf16 in one `vec4<u32>` (16 B) plus the
+/// matching 8 activation floats (two `vec4<f32>`). Value pair j of a granule
+/// feeds accumulator j, so the four accumulators stay independent and the
+/// reduction is a plain xor butterfly over the 32 lanes.
+///
+/// This exists because the u32-at-a-time kernel sustains 18-26 GB/s on this
+/// card while the qwen3-asr port measures 226-268 GB/s for the same shape.
+pub const GEMV_V4_T1: &str = r#"
+struct Params { rows: u32, kg: u32, }   // kg = in_features / 8
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<vec4<u32>>;   // 8 bf16 each
+@group(0) @binding(2) var<storage, read> x: array<vec4<f32>>;   // 4 f32 each
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;
+var<workgroup> bt0: array<f32, 256>;
+var<workgroup> bt1: array<f32, 256>;
+
+fn bf_lo(u: u32) -> f32 { return bitcast<f32>((u & 0xFFFFu) << 16u); }
+fn bf_hi(u: u32) -> f32 { return bitcast<f32>(u & 0xFFFF0000u); }
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let warp = li / 32u;
+    let lane = lid.x % 32u;
+    let row = wg.x * 8u + warp;
+    let wb = row * p.kg;
+    var a0 = 0.0;
+    var a1 = 0.0;
+    var a2 = 0.0;
+    var a3 = 0.0;
+    if (row < p.rows) {
+        var i = lane;
+        loop {
+            if (i >= p.kg) { break; }
+            let wv = w[wb + i];
+            let xa = x[i * 2u];
+            let xb = x[i * 2u + 1u];
+            a0 = a0 + bf_lo(wv.x) * xa.x + bf_hi(wv.x) * xa.y;
+            a1 = a1 + bf_lo(wv.y) * xa.z + bf_hi(wv.y) * xa.w;
+            a2 = a2 + bf_lo(wv.z) * xb.x + bf_hi(wv.z) * xb.y;
+            a3 = a3 + bf_lo(wv.w) * xb.z + bf_hi(wv.w) * xb.w;
+            i = i + 32u;
+        }
+    }
+    let wid = li & 0xFFFFFFE0u;
+    bt0[lid.x] = a0 + a1 + a2 + a3;
+    workgroupBarrier();
+    var s = bt0[lid.x] + bt0[wid + (lane ^ 16u)];
+    bt1[lid.x] = s;
+    workgroupBarrier();
+    s = bt1[lid.x] + bt1[wid + (lane ^ 8u)];
+    bt0[lid.x] = s;
+    workgroupBarrier();
+    s = bt0[lid.x] + bt0[wid + (lane ^ 4u)];
+    bt1[lid.x] = s;
+    workgroupBarrier();
+    s = bt1[lid.x] + bt1[wid + (lane ^ 2u)];
+    bt0[lid.x] = s;
+    workgroupBarrier();
+    s = bt0[lid.x] + bt0[wid + (lane ^ 1u)];
+    if (lane == 0u && row < p.rows) {
+        y[row] = s + b[row];
+    }
+}
+"#;
+
+/// Six-token linear with vec4 weight loads: the DiT's CFG batch.
+///
+/// The same granule arithmetic as the single-token kernel (value pair j feeds
+/// accumulator j), repeated over the six rows of the batched sequence while the
+/// weight granule is read once for all of them. Six independent accumulator
+/// groups keep the dependency depth at two FMAs.
+pub const GEMV_V4_T6: &str = r#"
+struct Params { rows: u32, kg: u32, }   // kg = in_features / 8
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<vec4<u32>>;
+@group(0) @binding(2) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;
+var<workgroup> bt: array<array<f32, 256>, 6>;
+
+fn bf_lo(u: u32) -> f32 { return bitcast<f32>((u & 0xFFFFu) << 16u); }
+fn bf_hi(u: u32) -> f32 { return bitcast<f32>(u & 0xFFFF0000u); }
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let warp = li / 32u;
+    let lane = lid.x % 32u;
+    let wid = li & 0xFFFFFFE0u;
+    let row = wg.x * 8u + warp;
+    let wb = row * p.kg;
+    var a00 = 0.0;
+    var a01 = 0.0;
+    var a02 = 0.0;
+    var a03 = 0.0;
+    var a10 = 0.0;
+    var a11 = 0.0;
+    var a12 = 0.0;
+    var a13 = 0.0;
+    var a20 = 0.0;
+    var a21 = 0.0;
+    var a22 = 0.0;
+    var a23 = 0.0;
+    var a30 = 0.0;
+    var a31 = 0.0;
+    var a32 = 0.0;
+    var a33 = 0.0;
+    var a40 = 0.0;
+    var a41 = 0.0;
+    var a42 = 0.0;
+    var a43 = 0.0;
+    var a50 = 0.0;
+    var a51 = 0.0;
+    var a52 = 0.0;
+    var a53 = 0.0;
+    if (row < p.rows) {
+        var i = lane;
+        loop {
+            if (i >= p.kg) { break; }
+            let wv = w[wb + i];
+            let xa0 = x[2u * i];
+            let xb0 = x[2u * i + 1u];
+            a00 = a00 + bf_lo(wv.x) * xa0.x + bf_hi(wv.x) * xa0.y;
+            a01 = a01 + bf_lo(wv.y) * xa0.z + bf_hi(wv.y) * xa0.w;
+            a02 = a02 + bf_lo(wv.z) * xb0.x + bf_hi(wv.z) * xb0.y;
+            a03 = a03 + bf_lo(wv.w) * xb0.z + bf_hi(wv.w) * xb0.w;
+            let xa1 = x[2u * i + 2u * p.kg];
+            let xb1 = x[2u * i + 2u * p.kg + 1u];
+            a10 = a10 + bf_lo(wv.x) * xa1.x + bf_hi(wv.x) * xa1.y;
+            a11 = a11 + bf_lo(wv.y) * xa1.z + bf_hi(wv.y) * xa1.w;
+            a12 = a12 + bf_lo(wv.z) * xb1.x + bf_hi(wv.z) * xb1.y;
+            a13 = a13 + bf_lo(wv.w) * xb1.z + bf_hi(wv.w) * xb1.w;
+            let xa2 = x[2u * i + 4u * p.kg];
+            let xb2 = x[2u * i + 4u * p.kg + 1u];
+            a20 = a20 + bf_lo(wv.x) * xa2.x + bf_hi(wv.x) * xa2.y;
+            a21 = a21 + bf_lo(wv.y) * xa2.z + bf_hi(wv.y) * xa2.w;
+            a22 = a22 + bf_lo(wv.z) * xb2.x + bf_hi(wv.z) * xb2.y;
+            a23 = a23 + bf_lo(wv.w) * xb2.z + bf_hi(wv.w) * xb2.w;
+            let xa3 = x[2u * i + 6u * p.kg];
+            let xb3 = x[2u * i + 6u * p.kg + 1u];
+            a30 = a30 + bf_lo(wv.x) * xa3.x + bf_hi(wv.x) * xa3.y;
+            a31 = a31 + bf_lo(wv.y) * xa3.z + bf_hi(wv.y) * xa3.w;
+            a32 = a32 + bf_lo(wv.z) * xb3.x + bf_hi(wv.z) * xb3.y;
+            a33 = a33 + bf_lo(wv.w) * xb3.z + bf_hi(wv.w) * xb3.w;
+            let xa4 = x[2u * i + 8u * p.kg];
+            let xb4 = x[2u * i + 8u * p.kg + 1u];
+            a40 = a40 + bf_lo(wv.x) * xa4.x + bf_hi(wv.x) * xa4.y;
+            a41 = a41 + bf_lo(wv.y) * xa4.z + bf_hi(wv.y) * xa4.w;
+            a42 = a42 + bf_lo(wv.z) * xb4.x + bf_hi(wv.z) * xb4.y;
+            a43 = a43 + bf_lo(wv.w) * xb4.z + bf_hi(wv.w) * xb4.w;
+            let xa5 = x[2u * i + 10u * p.kg];
+            let xb5 = x[2u * i + 10u * p.kg + 1u];
+            a50 = a50 + bf_lo(wv.x) * xa5.x + bf_hi(wv.x) * xa5.y;
+            a51 = a51 + bf_lo(wv.y) * xa5.z + bf_hi(wv.y) * xa5.w;
+            a52 = a52 + bf_lo(wv.z) * xb5.x + bf_hi(wv.z) * xb5.y;
+            a53 = a53 + bf_lo(wv.w) * xb5.z + bf_hi(wv.w) * xb5.w;
+            i = i + 32u;
+        }
+    }
+    bt[0][lid.x] = a00 + a01 + a02 + a03;
+    bt[1][lid.x] = a10 + a11 + a12 + a13;
+    bt[2][lid.x] = a20 + a21 + a22 + a23;
+    bt[3][lid.x] = a30 + a31 + a32 + a33;
+    bt[4][lid.x] = a40 + a41 + a42 + a43;
+    bt[5][lid.x] = a50 + a51 + a52 + a53;
+    workgroupBarrier();
+    workgroupBarrier();
+    bt[0][lid.x] = bt[0][lid.x] + bt[0][wid + (lane ^ 16u)];
+    bt[1][lid.x] = bt[1][lid.x] + bt[1][wid + (lane ^ 16u)];
+    bt[2][lid.x] = bt[2][lid.x] + bt[2][wid + (lane ^ 16u)];
+    bt[3][lid.x] = bt[3][lid.x] + bt[3][wid + (lane ^ 16u)];
+    bt[4][lid.x] = bt[4][lid.x] + bt[4][wid + (lane ^ 16u)];
+    bt[5][lid.x] = bt[5][lid.x] + bt[5][wid + (lane ^ 16u)];
+    workgroupBarrier();
+    bt[0][lid.x] = bt[0][lid.x] + bt[0][wid + (lane ^ 8u)];
+    bt[1][lid.x] = bt[1][lid.x] + bt[1][wid + (lane ^ 8u)];
+    bt[2][lid.x] = bt[2][lid.x] + bt[2][wid + (lane ^ 8u)];
+    bt[3][lid.x] = bt[3][lid.x] + bt[3][wid + (lane ^ 8u)];
+    bt[4][lid.x] = bt[4][lid.x] + bt[4][wid + (lane ^ 8u)];
+    bt[5][lid.x] = bt[5][lid.x] + bt[5][wid + (lane ^ 8u)];
+    workgroupBarrier();
+    bt[0][lid.x] = bt[0][lid.x] + bt[0][wid + (lane ^ 4u)];
+    bt[1][lid.x] = bt[1][lid.x] + bt[1][wid + (lane ^ 4u)];
+    bt[2][lid.x] = bt[2][lid.x] + bt[2][wid + (lane ^ 4u)];
+    bt[3][lid.x] = bt[3][lid.x] + bt[3][wid + (lane ^ 4u)];
+    bt[4][lid.x] = bt[4][lid.x] + bt[4][wid + (lane ^ 4u)];
+    bt[5][lid.x] = bt[5][lid.x] + bt[5][wid + (lane ^ 4u)];
+    workgroupBarrier();
+    bt[0][lid.x] = bt[0][lid.x] + bt[0][wid + (lane ^ 2u)];
+    bt[1][lid.x] = bt[1][lid.x] + bt[1][wid + (lane ^ 2u)];
+    bt[2][lid.x] = bt[2][lid.x] + bt[2][wid + (lane ^ 2u)];
+    bt[3][lid.x] = bt[3][lid.x] + bt[3][wid + (lane ^ 2u)];
+    bt[4][lid.x] = bt[4][lid.x] + bt[4][wid + (lane ^ 2u)];
+    bt[5][lid.x] = bt[5][lid.x] + bt[5][wid + (lane ^ 2u)];
+    workgroupBarrier();
+    bt[0][lid.x] = bt[0][lid.x] + bt[0][wid + (lane ^ 1u)];
+    bt[1][lid.x] = bt[1][lid.x] + bt[1][wid + (lane ^ 1u)];
+    bt[2][lid.x] = bt[2][lid.x] + bt[2][wid + (lane ^ 1u)];
+    bt[3][lid.x] = bt[3][lid.x] + bt[3][wid + (lane ^ 1u)];
+    bt[4][lid.x] = bt[4][lid.x] + bt[4][wid + (lane ^ 1u)];
+    bt[5][lid.x] = bt[5][lid.x] + bt[5][wid + (lane ^ 1u)];
+
+    if (lane == 0u && row < p.rows) {
+        y[0u * p.rows + row] = bt[0][lid.x] + b[row];
+        y[1u * p.rows + row] = bt[1][lid.x] + b[row];
+        y[2u * p.rows + row] = bt[2][lid.x] + b[row];
+        y[3u * p.rows + row] = bt[3][lid.x] + b[row];
+        y[4u * p.rows + row] = bt[4][lid.x] + b[row];
+        y[5u * p.rows + row] = bt[5][lid.x] + b[row];
+    }
+}
+"#;
+
 /// Multi-token linear with each weight row read ONCE for up to 8 tokens.
 /// y[t, r] = W[r,:] . X[t,:] + b[r]
 /// W bf16 packed [rows, in_words]; X f32 [T<=8, in]; Y f32 [T, rows].

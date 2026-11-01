@@ -324,6 +324,52 @@ mod gemm_bench {
         }
     }
 
+    /// The vec4 single-token kernel must reproduce the multi-token kernel's first
+    /// row exactly (same weights, same x row).
+    #[test]
+    fn vec4_single_matches_multi() {
+        let gpu = Gpu::new().unwrap();
+        let ops = Ops::new(gpu.clone());
+        for (rows, inf) in [(896usize, 896usize), (4864, 896), (1024, 1024), (4096, 1024)] {
+            let lin = lin_of(&gpu, rows, inf);
+            let mut xv = vec![0f32; 2 * inf];
+            for j in 0..inf {
+                xv[j] = ((j % 17) as f32 - 8.0) * 0.031;
+                xv[inf + j] = xv[j];
+            }
+            let xb = gpu.upload_f32(&xv, "iso.x");
+            let y1 = ops.linear(&lin, &xb, 1).unwrap();
+            let y2 = ops.linear(&lin, &xb, 2).unwrap();
+            let a = gpu.read_f32(&y1, rows).unwrap();
+            let b = gpu.read_f32(&y2, 2 * rows).unwrap();
+            let e = rel_l2(&a, &b[..rows]);
+            println!("  {rows}x{inf}: vec4 vs t2 rel_l2={e:.3e}");
+            assert!(e < 1e-5, "{rows}x{inf}: {e:.3e}");
+        }
+    }
+
+    /// The vec4 six-token kernel must reproduce the 8-token kernel's rows.
+    #[test]
+    fn vec4_six_matches_t8() {
+        let gpu = Gpu::new().unwrap();
+        let ops = Ops::new(gpu.clone());
+        for (rows, inf) in [(1024usize, 1024usize), (4096, 1024), (1024, 4096)] {
+            let lin = lin_of(&gpu, rows, inf);
+            let mut xv = vec![0f32; 8 * inf];
+            for j in 0..8 * inf {
+                xv[j] = ((j % 23) as f32 - 11.0) * 0.017;
+            }
+            let xb = gpu.upload_f32(&xv, "iso6.x");
+            let y6 = ops.linear(&lin, &xb, 6).unwrap();
+            let y8 = ops.linear(&lin, &xb, 8).unwrap();   // 8 tokens -> T8 kernel
+            let a = gpu.read_f32(&y6, 6 * rows).unwrap();
+            let b = gpu.read_f32(&y8, 8 * rows).unwrap();
+            let e = rel_l2(&a, &b[..6 * rows]);
+            println!("  {rows}x{inf}: v4t6 vs t8 rel_l2={e:.3e}");
+            assert!(e < 1e-5, "{rows}x{inf}: {e:.3e}");
+        }
+    }
+
     /// What the linear kernel actually sustains, against the ~268 GB/s that the
     /// qwen3-asr port measured on this same card for the same kind of GEMV.
     #[test]

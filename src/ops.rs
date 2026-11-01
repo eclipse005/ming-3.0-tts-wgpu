@@ -247,6 +247,8 @@ pub struct Ops {
     k_linear: crate::nn::Kernel,
     k_linear_t4: crate::nn::Kernel,
     k_linear_t8: crate::nn::Kernel,
+    k_linear_v4: crate::nn::Kernel,
+    k_linear_v4t6: crate::nn::Kernel,
     k_linear_t8u4: crate::nn::Kernel,
     k_rope: crate::nn::Kernel,
     k_attend: crate::nn::Kernel,
@@ -266,6 +268,8 @@ impl Ops {
             k_linear: kernel(&gpu, shaders::GEMV_MROW, 3),
             k_linear_t4: kernel(&gpu, shaders::GEMV_MROW_T4, 3),
             k_linear_t8: kernel(&gpu, shaders::GEMV_MROW_T8, 3),
+            k_linear_v4: kernel(&gpu, shaders::GEMV_V4_T1, 3),
+            k_linear_v4t6: kernel(&gpu, shaders::GEMV_V4_T6, 3),
             k_linear_t8u4: kernel(&gpu, shaders::GEMV_MROW_T8U4, 3),
             k_rope: kernel(&gpu, shaders::ROPE, 2),
             k_attend: kernel(&gpu, shaders::ATTEND, 3),
@@ -310,6 +314,30 @@ impl Ops {
                 &[&lin.w, x, &lin.b],
                 y,
                 ((lin.rows + 7) / 8) as u32,
+                1,
+            );
+            return;
+        }
+        // Six-token DiT batch: vec4 weight loads, six accumulator groups.
+        if t == 6 && lin.in_features % 8 == 0 && lin.rows % 8 == 0 {
+            self.k_linear_v4t6.run(
+                &self.gpu,
+                &uni2(lin.rows as u32, (lin.in_features / 8) as u32),
+                &[&lin.w, x, &lin.b],
+                y,
+                (lin.rows / 8) as u32,
+                1,
+            );
+            return;
+        }
+        // Single-token decode: vec4 (16 B) weight loads instead of one u32.
+        if t == 1 && lin.in_features % 8 == 0 && lin.rows % 8 == 0 {
+            self.k_linear_v4.run(
+                &self.gpu,
+                &uni2(lin.rows as u32, (lin.in_features / 8) as u32),
+                &[&lin.w, x, &lin.b],
+                y,
+                (lin.rows / 8) as u32,
                 1,
             );
             return;
