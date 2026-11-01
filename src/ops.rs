@@ -43,6 +43,9 @@ pub struct Lin {
     pub b: Buffer,
     pub rows: usize,
     pub in_features: usize,
+    /// Stable id for bind-group caching. Zero means "not cacheable" (test and
+    /// one-off layers constructed by hand).
+    pub id: u64,
 }
 
 impl Lin {
@@ -62,7 +65,9 @@ impl Lin {
             Ok(bt) => gpu.upload_f32(&bt.to_f32()?, "lin.b"),
             Err(_) => gpu.upload_f32(&vec![0.0; rows], "lin.b0"),
         };
-        Ok(Self { w: wbuf, b: bbuf, rows, in_features })
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Self { w: wbuf, b: bbuf, rows, in_features, id })
     }
 }
 
@@ -336,12 +341,89 @@ impl Ops {
         Ok(y)
     }
 
+    fn t6_plan(&self, lin: &Lin) -> Option<(&crate::nn::Kernel, usize)> {
+        if lin.in_features % 256 != 0 {
+            return None;
+        }
+        // Four lanes/row wins the isolated K=4096 microbench but only emits
+        // 16 workgroups for a [1024, 4096] layer, so it under-fills the 20 SMs
+        // and loses end-to-end. Keep it behind MING_T6=v5 only.
+        let use_four = self.t6_fourlane;
+        let use_quarter = self.t6_quarterwarp
+            || (self.t6_hybrid && lin.in_features <= 2048);
+        let plan = if use_four {
+            (&self.k_linear_t6fl, 64)
+        } else if use_quarter {
+            (&self.k_linear_t6qw, 32)
+        } else if self.t6_halfwarp {
+            (&self.k_linear_t6hw, 16)
+        } else if self.t6_paired {
+            (&self.k_linear_t6v2, 8)
+        } else if self.t6_specialized {
+            (&self.k_linear_t8u4, 8)
+        } else {
+            (&self.k_linear_t8u4_base, 8)
+        };
+        Some(plan)
+    }
+
+    /// Same dispatch as [`Self::linear_into`], but for callers that keep the
+    /// activation and output buffers alive for the whole model. `x_slot` and
+    /// `y_slot` must identify those buffers; the layer's own id disambiguates
+    /// the weights.
+    pub fn linear_into_cached(
+        &self,
+        lin: &Lin,
+        x: &Buffer,
+        y: &Buffer,
+        t: usize,
+        x_slot: u64,
+        y_slot: u64,
+    ) {
+        if t == 6 {
+            if let Some((k, per_wg)) = self.t6_plan(lin) {
+                let key = lin.id.rotate_left(24) ^ x_slot.rotate_left(12) ^ y_slot;
+                k.run_cached(
+                    &self.gpu,
+                    key,
+                    &uni4(lin.rows as u32, (lin.in_features / 2) as u32, 6, 0),
+                    &[&lin.w, x, &lin.b],
+                    y,
+                    lin.rows.div_ceil(per_wg) as u32,
+                    1,
+                );
+                return;
+            }
+        }
+        if t == 1 && lin.in_features % 8 == 0 && lin.rows % 8 == 0 {
+            let half =
+                self.t1_halfwarp && lin.rows <= 1024 && lin.in_features <= 1024;
+            let (k, per_wg) = if half {
+                (&self.k_linear_t1hw, 16)
+            } else {
+                (&self.k_linear_v4, 8)
+            };
+            let key = lin.id.rotate_left(24) ^ x_slot.rotate_left(12) ^ y_slot;
+            k.run_cached(
+                &self.gpu,
+                key,
+                &uni2(lin.rows as u32, (lin.in_features / 8) as u32),
+                &[&lin.w, x, &lin.b],
+                y,
+                lin.rows.div_ceil(per_wg) as u32,
+                1,
+            );
+            return;
+        }
+        self.linear_into(lin, x, y, t);
+    }
+
     pub fn linear_into(&self, lin: &Lin, x: &Buffer, y: &Buffer, t: usize) {
         // Long prompts are wide enough to amortise a real 2D tile. The generic
         // path below still covers odd shapes and remains available via
         // MING_PREFILL=base for A/B.
         if self.prefill_tiled
-            && t >= 16
+            && (16..=48).contains(&t)
             && lin.rows % 64 == 0
             && lin.in_features % 32 == 0
             // The 896x4864 down projection only yields 14 N tiles, so the tiled
@@ -363,35 +445,18 @@ impl Ops {
             );
             return;
         }
-        if t == 6 && lin.in_features % 256 == 0 {
-            // Four lanes/row wins the isolated K=4096 microbench but only emits
-            // 16 workgroups for a [1024, 4096] layer, so it under-fills the 20
-            // SMs and loses 15% end-to-end. Keep it behind MING_T6=v5 only.
-            let use_four = self.t6_fourlane;
-            let use_quarter = self.t6_quarterwarp
-                || (self.t6_hybrid && lin.in_features <= 2048);
-            let (k, per_wg) = if use_four {
-                (&self.k_linear_t6fl, 64)
-            } else if use_quarter {
-                (&self.k_linear_t6qw, 32)
-            } else if self.t6_halfwarp {
-                (&self.k_linear_t6hw, 16)
-            } else if self.t6_paired {
-                (&self.k_linear_t6v2, 8)
-            } else if self.t6_specialized {
-                (&self.k_linear_t8u4, 8)
-            } else {
-                (&self.k_linear_t8u4_base, 8)
-            };
-            k.run(
-                &self.gpu,
-                &uni4(lin.rows as u32, (lin.in_features / 2) as u32, 6, 0),
-                &[&lin.w, x, &lin.b],
-                y,
-                lin.rows.div_ceil(per_wg) as u32,
-                1,
-            );
-            return;
+        if t == 6 {
+            if let Some((k, per_wg)) = self.t6_plan(lin) {
+                k.run(
+                    &self.gpu,
+                    &uni4(lin.rows as u32, (lin.in_features / 2) as u32, 6, 0),
+                    &[&lin.w, x, &lin.b],
+                    y,
+                    lin.rows.div_ceil(per_wg) as u32,
+                    1,
+                );
+                return;
+            }
         }
         // Six-token DiT batch: vec4 weight loads, six accumulator groups.
         if t == 6 && lin.in_features % 8 == 0 && lin.rows % 8 == 0 {
@@ -468,10 +533,59 @@ impl Ops {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn rms_into(&self, x: &Buffer, w: &Buffer, y: &Buffer, rows: usize, dim: usize) {
+        self.k_rms.run(
+            &self.gpu,
+            &uni2(dim as u32, RMS_EPS.to_bits()),
+            &[x, w],
+            y,
+            rows as u32,
+            1,
+        );
+    }
+
+    pub fn rms_into_cached(
+        &self,
+        x: &Buffer,
+        w: &Buffer,
+        y: &Buffer,
+        rows: usize,
+        dim: usize,
+        key: u64,
+    ) {
+        self.k_rms.run_cached(
+            &self.gpu,
+            key,
+            &uni2(dim as u32, RMS_EPS.to_bits()),
+            &[x, w],
+            y,
+            rows as u32,
+            1,
+        );
+    }
+
     pub fn add(&self, a: &Buffer, b: &Buffer, n: usize) -> Buffer {
         let y = self.gpu.storage((n * 4) as u64, "add.y");
-        self.k_add.run(&self.gpu, &uni1(n as u32), &[a, b], &y, ((n + 255) / 256) as u32, 1);
+        self.add_into(a, b, &y, n);
         y
+    }
+
+    pub fn add_into(&self, a: &Buffer, b: &Buffer, y: &Buffer, n: usize) {
+        self.k_add
+            .run(&self.gpu, &uni1(n as u32), &[a, b], y, n.div_ceil(256) as u32, 1);
+    }
+
+    pub fn add_into_cached(&self, a: &Buffer, b: &Buffer, y: &Buffer, n: usize, key: u64) {
+        self.k_add.run_cached(
+            &self.gpu,
+            key,
+            &uni1(n as u32),
+            &[a, b],
+            y,
+            n.div_ceil(256) as u32,
+            1,
+        );
     }
 
     pub fn silu_mul(&self, g: &Buffer, u: &Buffer, n: usize) -> Buffer {
@@ -480,10 +594,46 @@ impl Ops {
         y
     }
 
+    pub fn silu_mul_into_cached(
+        &self,
+        g: &Buffer,
+        u: &Buffer,
+        y: &Buffer,
+        n: usize,
+        key: u64,
+    ) {
+        self.k_silu.run_cached(
+            &self.gpu,
+            key,
+            &uni1(n as u32),
+            &[g, u],
+            y,
+            n.div_ceil(256) as u32,
+            1,
+        );
+    }
+
     pub fn gelu(&self, x: &Buffer, n: usize) -> Buffer {
         let y = self.gpu.storage((n * 4) as u64, "gelu.y");
-        self.k_gelu.run(&self.gpu, &uni1(n as u32), &[x], &y, ((n + 255) / 256) as u32, 1);
+        self.gelu_into(x, &y, n);
         y
+    }
+
+    pub fn gelu_into(&self, x: &Buffer, y: &Buffer, n: usize) {
+        self.k_gelu
+            .run(&self.gpu, &uni1(n as u32), &[x], y, n.div_ceil(256) as u32, 1);
+    }
+
+    pub fn gelu_into_cached(&self, x: &Buffer, y: &Buffer, n: usize, key: u64) {
+        self.k_gelu.run_cached(
+            &self.gpu,
+            key,
+            &uni1(n as u32),
+            &[x],
+            y,
+            n.div_ceil(256) as u32,
+            1,
+        );
     }
 
     /// Rotary embedding, in place. interleaved: 0 = Qwen2 rotate-half,
@@ -498,6 +648,34 @@ impl Ops {
         tokens: usize,
     ) {
         self.rope_rows(tables, buf, n_heads, interleaved, pos_base, tokens, 0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rope_cached(
+        &self,
+        key: u64,
+        tables: &RopeTables,
+        buf: &Buffer,
+        n_heads: usize,
+        interleaved: u32,
+        pos_base: usize,
+        tokens: usize,
+        row_base: usize,
+    ) {
+        let mut u = [0u8; 16];
+        u[0..4].copy_from_slice(&(n_heads as u32).to_le_bytes());
+        u[4..8].copy_from_slice(&(pos_base as u32).to_le_bytes());
+        u[8..12].copy_from_slice(&interleaved.to_le_bytes());
+        u[12..16].copy_from_slice(&(row_base as u32).to_le_bytes());
+        self.k_rope.run_cached(
+            &self.gpu,
+            key,
+            &u,
+            &[&tables.cos, &tables.sin],
+            buf,
+            tokens as u32,
+            1,
+        );
     }
 
     /// Same rotation, but written to rows `row_base .. row_base + tokens`, with
@@ -539,15 +717,32 @@ impl Ops {
         self.k_kv_write.run(&self.gpu, &u, &[src], cache, tokens as u32, 1);
     }
 
-    pub fn attend(
+    pub fn kv_write_cached(
         &self,
-        p: &AttendParams,
-        q: &Buffer,
-        kc: &Buffer,
-        vc: &Buffer,
-        n_q_heads: usize,
-    ) -> Buffer {
-        let y = self.gpu.storage((p.t_q * p.stride * 4) as u64, "attn.y");
+        key: u64,
+        src: &Buffer,
+        cache: &Buffer,
+        tokens: usize,
+        pos_base: usize,
+        cap: usize,
+        n_kv: usize,
+    ) {
+        let mut u = [0u8; 16];
+        u[0..4].copy_from_slice(&(pos_base as u32).to_le_bytes());
+        u[4..8].copy_from_slice(&(cap as u32).to_le_bytes());
+        u[8..12].copy_from_slice(&(n_kv as u32).to_le_bytes());
+        self.k_kv_write.run_cached(
+            &self.gpu,
+            key,
+            &u,
+            &[src],
+            cache,
+            tokens as u32,
+            1,
+        );
+    }
+
+    fn attend_uniform(p: &AttendParams) -> [u8; 48] {
         let mut u = [0u8; 48];
         u[0..4].copy_from_slice(&(p.t_q as u32).to_le_bytes());
         u[4..8].copy_from_slice(&(p.q_pos_base as u32).to_le_bytes());
@@ -559,26 +754,109 @@ impl Ops {
         u[28..32].copy_from_slice(&(p.window as u32).to_le_bytes());
         u[32..36].copy_from_slice(&(p.cap as u32).to_le_bytes());
         u[36..40].copy_from_slice(&(p.group as u32).to_le_bytes());
-        self.k_attend
-            .run(&self.gpu, &u, &[q, kc, vc], &y, n_q_heads as u32, p.t_q as u32);
+        u
+    }
+
+    pub fn attend(
+        &self,
+        p: &AttendParams,
+        q: &Buffer,
+        kc: &Buffer,
+        vc: &Buffer,
+        n_q_heads: usize,
+    ) -> Buffer {
+        let y = self.gpu.storage((p.t_q * p.stride * 4) as u64, "attn.y");
+        self.attend_into(p, q, kc, vc, &y, n_q_heads);
         y
     }
 
+    pub fn attend_into(
+        &self,
+        p: &AttendParams,
+        q: &Buffer,
+        kc: &Buffer,
+        vc: &Buffer,
+        y: &Buffer,
+        n_q_heads: usize,
+    ) {
+        let u = Self::attend_uniform(p);
+        self.k_attend
+            .run(&self.gpu, &u, &[q, kc, vc], y, n_q_heads as u32, p.t_q as u32);
+    }
+
+    pub fn attend_into_cached(
+        &self,
+        p: &AttendParams,
+        q: &Buffer,
+        kc: &Buffer,
+        vc: &Buffer,
+        y: &Buffer,
+        n_q_heads: usize,
+        key: u64,
+    ) {
+        let u = Self::attend_uniform(p);
+        self.k_attend.run_cached(
+            &self.gpu,
+            key,
+            &u,
+            &[q, kc, vc],
+            y,
+            n_q_heads as u32,
+            p.t_q as u32,
+        );
+    }
+
     /// Assemble [row0, row1, row2] of width `dim` into one buffer.
+    #[allow(dead_code)]
     pub fn pack3(&self, a: &Buffer, b: &Buffer, c: &Buffer, dim: usize, rows: usize) -> Buffer {
         let y = self.gpu.storage((rows * dim * 4) as u64, "pack.y");
+        self.pack3_into(a, b, c, &y, dim, rows);
+        y
+    }
+
+    pub fn pack3_into(
+        &self,
+        a: &Buffer,
+        b: &Buffer,
+        c: &Buffer,
+        y: &Buffer,
+        dim: usize,
+        rows: usize,
+    ) {
         self.k_pack3.run(
             &self.gpu,
             &uni1(dim as u32),
             &[a, b, c],
-            &y,
+            y,
             ((rows * dim + 255) / 256) as u32,
             1,
         );
-        y
+    }
+
+    #[allow(dead_code)]
+    pub fn pack3_into_cached(
+        &self,
+        a: &Buffer,
+        b: &Buffer,
+        c: &Buffer,
+        y: &Buffer,
+        dim: usize,
+        rows: usize,
+        key: u64,
+    ) {
+        self.k_pack3.run_cached(
+            &self.gpu,
+            key,
+            &uni1(dim as u32),
+            &[a, b, c],
+            y,
+            ((rows * dim + 255) / 256) as u32,
+            1,
+        );
     }
 
     /// Assemble [y_cond, x_hist, x_now, y_null, x_hist, x_now] of width `dim`.
+    #[allow(dead_code)]
     pub fn pack6(
         &self,
         y_cond: &Buffer,
@@ -589,15 +867,51 @@ impl Ops {
     ) -> Buffer {
         let rows = 6;
         let y = self.gpu.storage((rows * dim * 4) as u64, "pack6.y");
+        self.pack6_into(y_cond, x_hist, x_now, y_null, &y, dim);
+        y
+    }
+
+    pub fn pack6_into(
+        &self,
+        y_cond: &Buffer,
+        x_hist: &Buffer,
+        x_now: &Buffer,
+        y_null: &Buffer,
+        y: &Buffer,
+        dim: usize,
+    ) {
+        let rows = 6;
         self.k_pack6.run(
             &self.gpu,
             &uni1(dim as u32),
             &[y_cond, x_hist, x_now, y_null],
-            &y,
+            y,
             ((rows * dim + 255) / 256) as u32,
             1,
         );
-        y
+    }
+
+    #[allow(dead_code)]
+    pub fn pack6_into_cached(
+        &self,
+        y_cond: &Buffer,
+        x_hist: &Buffer,
+        x_now: &Buffer,
+        y_null: &Buffer,
+        y: &Buffer,
+        dim: usize,
+        key: u64,
+    ) {
+        let rows = 6;
+        self.k_pack6.run_cached(
+            &self.gpu,
+            key,
+            &uni1(dim as u32),
+            &[y_cond, x_hist, x_now, y_null],
+            y,
+            ((rows * dim + 255) / 256) as u32,
+            1,
+        );
     }
 
     /// One CFM Euler step, on device: y += (pred + (pred-null)*cfg)*dt + k*sde.

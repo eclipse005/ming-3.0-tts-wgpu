@@ -55,9 +55,11 @@ target\release\ming-tts-wgpu.exe synth ^
 
 ## 当前唯一的未完成项
 
-RTF **1.16**，目标 < 0.88（Python 版）。DiT 占 66%，已从 4.30 s 降到 2.46 s。
-剩余方案按收益排序在 PROGRESS.md 第 5 节 P0；t=6 线性层的 kernel 选择可用
-`MING_T6=base|spec|v2|v3|v4|v5` 覆盖，默认按 K 自动选择。
+RTF 约 **1.0–1.2**（随热状态），目标 < 0.88。Rust 已快过 Python eager，但
+Python CUDA Graph 仍领先 1.3–1.5×。差距主要是 13 万次 dispatch 的 GPU 前端开销，
+下一步做 dispatch 合并（qkv / rope+KV+attention / matmul epilogue），不要继续试
+异步 submit（已实测更慢）。当前快路径可用 `MING_SCRATCH=0`、`MING_LM_FAST=0`、
+`MING_BIND_CACHE=0` 回退做 A/B；详见 PROGRESS 0.5.7。
 
 ```bat
 :: 分段耗时

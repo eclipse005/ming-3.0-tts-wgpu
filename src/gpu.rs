@@ -203,6 +203,11 @@ impl Gpu {
         buf
     }
 
+    /// Overwrite an existing buffer (no allocation, no extra bind group).
+    pub fn write_f32(&self, buf: &Buffer, data: &[f32]) {
+        self.queue.write_buffer(buf, 0, bytemuck::cast_slice(data));
+    }
+
     pub fn upload_u32(&self, data: &[u32], label: &str) -> Buffer {
         let buf = self.storage((data.len() * 4) as u64, label);
         self.queue.write_buffer(&buf, 0, bytemuck::cast_slice(data));

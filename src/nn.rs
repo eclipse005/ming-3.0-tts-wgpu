@@ -9,6 +9,8 @@
 use crate::gpu::{Gpu, UNIFORM_SLOT};
 use crate::shaders;
 use anyhow::Result;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use wgpu::{BindGroupLayout, Buffer, ComputePipeline, ShaderModuleDescriptor};
 
 fn make_pipeline(gpu: &Gpu, src: &str, storage_ro: usize) -> (BindGroupLayout, ComputePipeline) {
@@ -84,6 +86,19 @@ fn record(
     wx: u32,
     wy: u32,
 ) {
+    let (bind, offset) = make_bind(gpu, bgl, uni, ro, rw);
+    gpu.run2d(pipe, &bind, offset, wx, wy);
+}
+
+/// Build one bind group. The uniform slot index is returned separately because
+/// it is passed as a dynamic offset, not baked into the group.
+fn make_bind(
+    gpu: &Gpu,
+    bgl: &BindGroupLayout,
+    uni: &[u8],
+    ro: &[&Buffer],
+    rw: &Buffer,
+) -> (wgpu::BindGroup, u32) {
     let offset = gpu.alloc_uniform(uni);
     let mut entries = vec![wgpu::BindGroupEntry {
         binding: 0,
@@ -108,17 +123,24 @@ fn record(
         layout: bgl,
         entries: &entries,
     });
-    gpu.run2d(pipe, &bind, offset, wx, wy);
+    (bind, offset)
 }
 
 pub(crate) struct Kernel {
     pub bgl: BindGroupLayout,
     pub pipe: ComputePipeline,
+    /// Groups for callers whose buffers live for the whole model. The caller's
+    /// key must identify the buffer set, not merely the operation.
+    cache: RefCell<HashMap<u64, wgpu::BindGroup>>,
 }
 
 pub(crate) fn kernel(gpu: &Gpu, src: &str, storage_ro: usize) -> Kernel {
     let (bgl, pipe) = make_pipeline(gpu, src, storage_ro);
-    Kernel { bgl, pipe }
+    Kernel {
+        bgl,
+        pipe,
+        cache: RefCell::new(HashMap::new()),
+    }
 }
 
 impl Kernel {
@@ -133,6 +155,34 @@ impl Kernel {
         wy: u32,
     ) {
         record(gpu, &self.bgl, &self.pipe, uni, ro, rw, wx, wy);
+    }
+
+    /// Record a dispatch, reusing the bind group previously stored under `key`.
+    ///
+    /// The caller must keep the same buffer set for a key. DiT uses persistent
+    /// scratch and immutable weights, so its groups survive all CFM steps;
+    /// one-shot paths must keep using [`Self::run`].
+    pub fn run_cached(
+        &self,
+        gpu: &Gpu,
+        key: u64,
+        uni: &[u8],
+        ro: &[&Buffer],
+        rw: &Buffer,
+        wx: u32,
+        wy: u32,
+    ) {
+        let cache_on = std::env::var("MING_BIND_CACHE").as_deref() != Ok("0");
+        if cache_on {
+            if let Some(bind) = self.cache.borrow().get(&key) {
+                let offset = gpu.alloc_uniform(uni);
+                gpu.run2d(&self.pipe, bind, offset, wx, wy);
+                return;
+            }
+        }
+        let (bind, offset) = make_bind(gpu, &self.bgl, uni, ro, rw);
+        gpu.run2d(&self.pipe, &bind, offset, wx, wy);
+        self.cache.borrow_mut().insert(key, bind);
     }
 }
 

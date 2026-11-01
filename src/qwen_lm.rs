@@ -35,9 +35,29 @@ struct Layer {
     vc: Buffer,
 }
 
+/// Persistent per-token scratch. Decode reuses the same shapes 24 times per
+/// step and ~63 steps per utterance; keeping buffers and bind groups stable
+/// removes the allocation/recording cost that CUDA graphs hide in Python.
+struct LlmScratch {
+    x0: Buffer,
+    h0: Buffer,
+    h1: Buffer,
+    a: Buffer,
+    a2: Buffer,
+    q: Buffer,
+    k: Buffer,
+    v: Buffer,
+    attn: Buffer,
+    o: Buffer,
+    gate: Buffer,
+    up: Buffer,
+    sil: Buffer,
+}
+
 pub struct LlmEngine {
     gpu: Gpu,
     layers: Vec<Layer>,
+    scratch: LlmScratch,
     norm_final: Buffer,
     stop_host_w: Vec<f32>,
     stop_host_b: Vec<f32>,
@@ -79,10 +99,29 @@ impl LlmEngine {
         let stop_host_w = p("stop_head.weight")?.to_f32()?;
         let stop_host_b = p("stop_head.bias")?.to_f32()?;
         let rope = RopeTables::new(&gpu, ROPE_THETA, HEAD_DIM, KV_CAP);
+        let scratch = {
+            let mk = |n: usize, label: &str| gpu.storage((n * 4) as u64, label);
+            LlmScratch {
+                x0: mk(HIDDEN, "lm.x0"),
+                h0: mk(HIDDEN, "lm.h0"),
+                h1: mk(HIDDEN, "lm.h1"),
+                a: mk(HIDDEN, "lm.a"),
+                a2: mk(HIDDEN, "lm.a2"),
+                q: mk(Q_HEADS * HEAD_DIM, "lm.q"),
+                k: mk(KV_HEADS * HEAD_DIM, "lm.k"),
+                v: mk(KV_HEADS * HEAD_DIM, "lm.v"),
+                attn: mk(HIDDEN, "lm.attn"),
+                o: mk(HIDDEN, "lm.o"),
+                gate: mk(FF, "lm.gate"),
+                up: mk(FF, "lm.up"),
+                sil: mk(FF, "lm.sil"),
+            }
+        };
 
         Ok(Self {
             gpu,
             layers,
+            scratch,
             norm_final,
             stop_host_w,
             stop_host_b,
@@ -134,6 +173,60 @@ impl LlmEngine {
     }
 
     fn transformer(&self, x: Buffer, t: usize, pos_base: usize) -> Result<Buffer> {
+        if t == 1 && std::env::var("MING_LM_FAST").map_or(true, |v| v != "0") {
+            let s = &self.scratch;
+            let mut h = x;
+            for (li, l) in self.layers.iter().enumerate() {
+                // DiT/aggregator and LLM share one Ops instance; give the LLM
+                // its own non-weight cache namespace.
+                let kb = 0x1_0000 | ((li as u64) << 8);
+                self.ops
+                    .rms_into_cached(&h, &l.norm1, &s.a, 1, HIDDEN, kb | 0x10);
+                self.ops
+                    .linear_into_cached(&l.q, &s.a, &s.q, 1, 1, 2);
+                self.ops
+                    .linear_into_cached(&l.k, &s.a, &s.k, 1, 1, 3);
+                self.ops
+                    .linear_into_cached(&l.v, &s.a, &s.v, 1, 1, 4);
+                self.ops
+                    .rope_cached(kb | 0x18, &self.rope, &s.q, Q_HEADS, 0, pos_base, 1, 0);
+                self.ops
+                    .rope_cached(kb | 0x19, &self.rope, &s.k, KV_HEADS, 0, pos_base, 1, 0);
+                self.ops
+                    .kv_write_cached(kb | 0x1A, &s.k, &l.kc, 1, pos_base, KV_CAP, KV_HEADS);
+                self.ops
+                    .kv_write_cached(kb | 0x1B, &s.v, &l.vc, 1, pos_base, KV_CAP, KV_HEADS);
+                let ap =
+                    AttendParams::causal(1, pos_base, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, KV_CAP);
+                self.ops.attend_into_cached(
+                    &ap,
+                    &s.q,
+                    &l.kc,
+                    &l.vc,
+                    &s.attn,
+                    Q_HEADS,
+                    kb | 0x1C,
+                );
+                self.ops
+                    .linear_into_cached(&l.o, &s.attn, &s.o, 1, 5, 6);
+                self.ops
+                    .add_into_cached(&h, &s.o, &s.h1, HIDDEN, kb | 0x12);
+                self.ops
+                    .rms_into_cached(&s.h1, &l.norm2, &s.a2, 1, HIDDEN, kb | 0x11);
+                self.ops
+                    .linear_into_cached(&l.gate, &s.a2, &s.gate, 1, 7, 8);
+                self.ops
+                    .linear_into_cached(&l.up, &s.a2, &s.up, 1, 7, 9);
+                self.ops
+                    .silu_mul_into_cached(&s.gate, &s.up, &s.sil, FF, kb | 0x14);
+                self.ops
+                    .linear_into_cached(&l.down, &s.sil, &s.o, 1, 10, 6);
+                self.ops
+                    .add_into_cached(&s.h1, &s.o, &s.h0, HIDDEN, kb | 0x13);
+                h = s.h0.clone();
+            }
+            return Ok(h);
+        }
         let mut h = x;
         // MING_ACT_RANGE=1 prints the residual stream's magnitude per layer.
         // It is how we answer "can this checkpoint run in fp16": fp16 tops out
@@ -210,7 +303,13 @@ impl LlmEngine {
         if embed.len() != HIDDEN {
             bail!("step embed {} != {}", embed.len(), HIDDEN);
         }
-        let x = self.gpu.upload_f32(embed, "step.x");
+        let fast = std::env::var("MING_LM_FAST").map_or(true, |v| v != "0");
+        let x = if fast {
+            self.gpu.write_f32(&self.scratch.x0, embed);
+            self.scratch.x0.clone()
+        } else {
+            self.gpu.upload_f32(embed, "step.x")
+        };
         let h = self.transformer(x, 1, pos)?;
         self.last_hidden(&h, 1)
     }

@@ -546,9 +546,9 @@ fn main(
 /// rows per workgroup and cuts the reduction to four steps; 8 lanes reaches
 /// three steps. Paired activation loads are retained from
 /// [`GEMV_T6_PAIRED`].
-fn gemv_t6_lanes(lanes: u32) -> String {
-    assert!(32 % lanes == 0 && 256 % lanes == 0);
-    let rows_per_wg = 256 / lanes;
+fn gemv_t6_lanes(lanes: u32, threads: u32) -> String {
+    assert!(32 % lanes == 0 && threads % 32 == 0 && threads % lanes == 0);
+    let rows_per_wg = threads / lanes;
     let offsets = [0u32, lanes, 2 * lanes, 3 * lanes];
     let last_off = 3 * lanes;
     let stride = 4 * lanes;
@@ -597,7 +597,7 @@ var<workgroup> red: array<array<array<f32, {lanes}>, 6>, {rows_per_wg}>;
 fn bf_lo(u: u32) -> f32 {{ return bitcast<f32>((u & 0xFFFFu) << 16u); }}
 fn bf_hi(u: u32) -> f32 {{ return bitcast<f32>(u & 0xFFFF0000u); }}
 
-@compute @workgroup_size(256)
+@compute @workgroup_size({threads})
 fn main(
     @builtin(workgroup_id) wg: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
@@ -644,15 +644,15 @@ fn main(
 }
 
 pub fn gemv_t6_halfwarp() -> String {
-    gemv_t6_lanes(16)
+    gemv_t6_lanes(16, 256)
 }
 
 pub fn gemv_t6_quarterwarp() -> String {
-    gemv_t6_lanes(8)
+    gemv_t6_lanes(8, 256)
 }
 
 pub fn gemv_t6_fourlane() -> String {
-    gemv_t6_lanes(4)
+    gemv_t6_lanes(4, 256)
 }
 
 /// Single-token linear with half a warp per row.

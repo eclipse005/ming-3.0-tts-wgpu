@@ -3,8 +3,9 @@
 > **一句话状态**：Ming-3.0-tts-0.5b 已完整移植为纯 Rust + wgpu（无 Python / torch /
 > CUDA 依赖），五个里程碑全部数值对齐；36 个参数用例 **36/36 时长逐采样点一致**，
 > 26 例波形级重合（rel_l2 ≤ 5e-2，最好 3.6e-5），其余 10 例只有后段的相位差
-> （log-mel ≥ 0.9959，见 4.4）。**唯一未达成的验收项是 RTF：解码环 3.72 s / 3.2 s
-> 音频 → 1.16（本轮基线 1.74），Python 0.88 —— 交接见 0.5 节。**
+> （log-mel ≥ 0.9959，见 4.4）。**唯一未达成的验收项是 RTF：同热 A/B 解码环又降
+> 19–24%，Rust 已快过 Python eager，但 Python CUDA Graph 仍快约 1.3–1.5×；
+> 差距集中在 13 万次 dispatch 的 GPU 前端开销。见 0.5.7。**
 
 接手顺序：**本文** → [REVIEW.md](REVIEW.md)（代码结构评审与重构记录）→
 [WGPU_PORT_ANALYSIS.md](WGPU_PORT_ANALYSIS.md)（最初的拆解方案）。
@@ -137,6 +138,44 @@ cargo test --release -- --test-threads=1
 - 性能改动必须**背靠背 A/B**（同一分钟内跑两个版本），否则会被热降频骗（4.12）。
 - 不要为了让 benchmark 好看去改金标或放宽门限。
 
+### 0.5.7 第三轮：持久 scratch + bind cache（2026-11-01 下午）
+
+**做了什么**
+
+- DiT 与 LLM 的激活改为**整段持久 scratch**。同一 CFM/解码序列里的张量形状固定，
+  命令流保证顺序，因此一块 buffer 可重复使用。
+- `Kernel` 增加按调用方 key 缓存的 bind group；key 只用于“buffer 集合永不变化”的路径，
+  并用命名空间隔离 DiT block / aggregator / LLM，避免共享 `Ops` 时串权重。
+- 每次 DiT pair 前向：buffer 申请 **109 → 11**，bind group **156 → 13**。
+
+**同热背靠背（A1 短句，同一分钟）**
+
+| 阶段 | 旧路径 | 新路径 |
+|---|---:|---:|
+| prefill | 0.45 s | 0.44 s |
+| DiT | 3.09 s | **2.53 s** |
+| LLM + agg | 1.15 s | **1.04 s** |
+| 解码环 | 4.70 s | **3.82 s（−19%）** |
+
+长句（5 s 音频、63 latents）同热 A/B：**9.39 s → 7.59 s（−19%）**；
+温度稳定后再测为 6.62–6.75 s。数值：`cfg_pair` 2.9e-7、LLM replay worst 1.5e-6、
+64/64 测试通过。
+
+**Python 对照（同机、同文本）**
+
+- `bench_rtf.py`：mean synth **5.11 s / 5.07 s 音频，RTF 1.008**（CUDA Graph 开启）。
+- 阶段拆分：Flow **2.92 s**、LLM **1.49 s**、VAE **0.10 s**。
+- 关闭 CUDA Graph 后 Python eager 是 **8.26 s**（Flow 5.92），所以当前 Rust
+  （7.59 s）已经快过 eager，但 graph 仍快约 1.5×。
+
+**差距在哪**
+
+Python 的 CUDA Graph 把 13 万次 kernel 发射的 GPU 前端成本压到接近零；Rust 即便
+把 dispatch 录进同一个 compute pass，每个 dispatch 仍有约 10–17 µs 的前端/调度成本。
+下一步不是继续抠算术，而是**合并 dispatch**：qkv 三合一、rope+KV+attention 合一、
+matmul 融合 residual/gelu epilogue。CUDA Graph 在 wgpu 没有等价物，不应再尝试用
+“异步 submit”绕（已实测更慢）。
+
 ### 0.5.6 关于"能不能到 0.88"
 
 上一轮"DiT 屋顶 34–40 GB/s、0.88 到不了"的结论早已作废。本轮 t=6 已实测
@@ -183,6 +222,9 @@ cargo test --release -- --test-threads=1
 | `MING_T6=base\|spec\|v2\|v3\|v4\|v5\|hybrid` | 覆盖 DiT 六 token 线性层（默认 hybrid：K≤2048 用 v4 的 8 lanes，K>2048 用 v2） |
 | `MING_T1=base` | 关闭单 token 小投影的半 warp 归约 |
 | `MING_PREFILL=base` | 关闭 prefill 的 48×64 tile，回到 token 并行 GEMV |
+| `MING_SCRATCH=0` | 关闭 DiT 持久 scratch/缓存快路径（A/B 用） |
+| `MING_LM_FAST=0` | 关闭 LLM 持久 scratch/缓存快路径（A/B 用） |
+| `MING_BIND_CACHE=0` | 关闭 bind group 缓存（定位数值问题用） |
 | `MING_KV_TRACE=1` | VAE 编码器 dump KV cache（诊断） |
 | `MING_MODEL` / `MING_GOLDEN` | 覆盖模型 / 金标目录（测试用） |
 
@@ -484,14 +526,15 @@ GELU 用 erf 而不是 tanh 那件事仍然成立（每元素差 1e-3，是真�
 
 ## 5. 未完成与已知问题
 
-### P0：RTF 1.16 → 目标 < 0.88（唯一未达成的验收项）
+### P0：RTF ~1.0–1.2（随热状态）→ 目标 < 0.88（唯一未达成的验收项）
 
 **详细交接见 0.5 节**（时间账 / 已确认事实 / 成功与排除方案 / 剩余三条 / 工具门限）。
 
-进度：pred/null 合批（2.51 → 2.03）→ 本轮 t=6 配对激活 + lanes/行（1.74 → **1.16**）。
-DiT 单阶段已快过文档里的 Python（2.46 s vs 3.34 s），整句仍比 Python 的 2.8 s 预算多
-约 0.9 s。下一步优先做 split-K（解决 qkv/o 的 1024×1024 只有 32 个 workgroup 的
-欠占用），再做 RMS 融合和 bind/buffer 复用；DiT tile 原型、QKV 融合、subgroup 都已实测排除。
+进度：pred/null 合批（2.51 → 2.03）→ t=6 配对激活 + lanes/行（1.74 → 1.16）→
+持久 scratch + bind cache（同热再降 19%，见 0.5.7）。Rust 已快过 Python eager，
+但 Python CUDA Graph 仍领先约 1.3–1.5×。下一步必须减少 dispatch 数：qkv 三合一、
+rope+KV+attention 合一、matmul 融 residual/gelu。split-K、RMS 融合和继续调 lanes
+的收益都小于 dispatch 合并。
 
 ### P1：轨迹分岔（已收口：6 例连时长都错 → 10 例"只在后段"）
 

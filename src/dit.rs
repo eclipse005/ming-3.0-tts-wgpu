@@ -20,6 +20,36 @@ pub const XFF: usize = 4096;
 pub const DIT_KV_CAP: usize = 512;
 pub const STEPS: usize = 10;
 
+/// Persistent activation scratch for the DiT/aggregator.
+///
+/// Every CFM step has identical tensor shapes and the GPU executes recorded
+/// dispatches in order, so one buffer set is enough for the whole sample.
+/// Stable addresses also let kernels cache bind groups instead of rebuilding
+/// ~150 of them per forward.
+struct Scratch {
+    h: [Buffer; 2],
+    a: Buffer,
+    a2: Buffer,
+    q: Buffer,
+    k: Buffer,
+    v: Buffer,
+    attn: Buffer,
+    o: Buffer,
+    fi: Buffer,
+    g: Buffer,
+    seq: Buffer,
+}
+
+const S_A: u64 = 3;
+const S_A2: u64 = 4;
+const S_Q: u64 = 5;
+const S_K: u64 = 6;
+const S_V: u64 = 7;
+const S_ATTN: u64 = 8;
+const S_O: u64 = 9;
+const S_FI: u64 = 10;
+const S_G: u64 = 11;
+
 struct XBlock {
     q: Lin,
     k: Lin,
@@ -57,6 +87,7 @@ pub struct DitEngine {
     // out of memory. Only one block is ever in flight, so one pair suffices.
     kv_k: Buffer,
     kv_v: Buffer,
+    scratch: Scratch,
     ops: Arc<Ops>,
 }
 
@@ -122,6 +153,22 @@ impl DitEngine {
             );
         }
         let rope = RopeTables::from_inv_freq(&gpu, &inv_freq, 512);
+        let scratch = {
+            let mk = |bytes: usize, label: &str| gpu.storage((bytes * 4) as u64, label);
+            Scratch {
+                h: [mk(6 * XH, "scratch.h0"), mk(6 * XH, "scratch.h1")],
+                a: mk(6 * XH, "scratch.a"),
+                a2: mk(6 * XH, "scratch.a2"),
+                q: mk(6 * XH, "scratch.q"),
+                k: mk(6 * XH, "scratch.k"),
+                v: mk(6 * XH, "scratch.v"),
+                attn: mk(6 * XH, "scratch.attn"),
+                o: mk(6 * XH, "scratch.o"),
+                fi: mk(6 * XFF, "scratch.fi"),
+                g: mk(6 * XFF, "scratch.g"),
+                seq: mk(6 * XH, "scratch.seq"),
+            }
+        };
         Ok(Self {
             t_mlp1: lin("flowloss.cfm.model.t_embedder.time_mlp.0", XH, 256)?,
             t_mlp2: lin("flowloss.cfm.model.t_embedder.time_mlp.2", XH, XH)?,
@@ -143,6 +190,7 @@ impl DitEngine {
             zero_c: gpu.upload_f32(&vec![0.0; 896], "zero_c"),
             kv_k: gpu.storage((XHEADS * 512 * 64 * 4) as u64, "x.kv_k"),
             kv_v: gpu.storage((XHEADS * 512 * 64 * 4) as u64, "x.kv_v"),
+            scratch,
             ops,
             gpu,
         })
@@ -179,14 +227,84 @@ impl DitEngine {
         t: usize,
         group: usize,
     ) -> Result<Buffer> {
+        // Fast path: all production DiT/aggregator calls fit the six-row
+        // scratch. Buffers and bind groups stay fixed across CFM steps.
+        if t <= 6 && std::env::var("MING_SCRATCH").map_or(true, |v| v != "0") {
+            let s = &self.scratch;
+            // DiT and aggregator both have eight blocks and share the scratch,
+            // so their non-weight cache keys need distinct namespaces.
+            let tag = if std::ptr::eq(blocks.as_ptr(), self.blocks.as_ptr()) {
+                0
+            } else {
+                0x8000
+            };
+            let mut h = seq.clone();
+            for (bi, b) in blocks.iter().enumerate() {
+                let kb = tag | ((bi as u64) << 8);
+                let h_out = &s.h[0];
+                let h_tmp = &s.h[1];
+                self.ops
+                    .rms_into_cached(&h, &b.n1, &s.a, t, XH, kb | 0x10);
+                self.ops
+                    .linear_into_cached(&b.q, &s.a, &s.q, t, S_A, S_Q);
+                self.ops
+                    .linear_into_cached(&b.k, &s.a, &s.k, t, S_A, S_K);
+                self.ops
+                    .linear_into_cached(&b.v, &s.a, &s.v, t, S_A, S_V);
+                if group == 0 {
+                    self.ops
+                        .rope_cached(0x5A, &self.rope, &s.q, XHEADS, 1, 0, t, 0);
+                    self.ops
+                        .rope_cached(0x5B, &self.rope, &s.k, XHEADS, 1, 0, t, 0);
+                } else {
+                    let mut row = 0;
+                    while row < t {
+                        self.ops
+                            .rope_cached(0x5A, &self.rope, &s.q, XHEADS, 1, 0, group, row);
+                        self.ops
+                            .rope_cached(0x5B, &self.rope, &s.k, XHEADS, 1, 0, group, row);
+                        row += group;
+                    }
+                }
+                let kc = &self.kv_k;
+                let vc = &self.kv_v;
+                self.ops
+                    .kv_write_cached(0x5C, &s.k, kc, t, 0, 512, XHEADS);
+                self.ops
+                    .kv_write_cached(0x5D, &s.v, vc, t, 0, 512, XHEADS);
+                let mut ap = AttendParams::full(t, 64, XH, DIT_KV_CAP);
+                if group > 0 {
+                    ap = ap.with_group(group);
+                }
+                self.ops
+                    .attend_into_cached(&ap, &s.q, kc, vc, &s.attn, XHEADS, 0xA77E);
+                self.ops
+                    .linear_into_cached(&b.o, &s.attn, &s.o, t, S_ATTN, S_O);
+                self.ops
+                    .add_into_cached(&h, &s.o, h_tmp, t * XH, kb | 0x12);
+                self.ops
+                    .rms_into_cached(h_tmp, &b.n2, &s.a2, t, XH, kb | 0x11);
+                self.ops
+                    .linear_into_cached(&b.ff_in, &s.a2, &s.fi, t, S_A2, S_FI);
+                self.ops
+                    .gelu_into_cached(&s.fi, &s.g, t * XFF, kb | 0x14);
+                // s.o is dead after the attention residual, so reuse it here.
+                self.ops
+                    .linear_into_cached(&b.ff_out, &s.g, &s.o, t, S_G, S_O);
+                self.ops
+                    .add_into_cached(h_tmp, &s.o, h_out, t * XH, kb | 0x13);
+                h = h_out.clone();
+            }
+            return Ok(h);
+        }
+
+        // Fallback for hypothetical longer sequences (not used by Ming-0.5b).
         let mut h = seq.clone();
         for b in blocks {
             let a = self.rms(&h, &b.n1, t);
             let q = self.mrow(&b.q, &a, t)?;
             let k = self.mrow(&b.k, &a, t)?;
             let v = self.mrow(&b.v, &a, t)?;
-            // rope: 16 heads, checkpoint inv_freq, interleaved. Each group is its
-            // own 0..n-1 sequence, even though the rows are contiguous.
             if group == 0 {
                 self.ops.rope(&self.rope, &q, XHEADS, 1, 0, t);
                 self.ops.rope(&self.rope, &k, XHEADS, 1, 0, t);
@@ -198,7 +316,6 @@ impl DitEngine {
                     row += group;
                 }
             }
-            // stage k/v into the shared cache layout and attend bidirectionally
             let kc = &self.kv_k;
             let vc = &self.kv_v;
             self.ops.kv_write(&k, kc, t, 0, 512, XHEADS);
@@ -255,9 +372,13 @@ impl DitEngine {
         let y = self.add(&tm2, &ce, XH);
 
         // assemble seq [3, 1024] = [y, x_hist, x_now]
-        let seq = self.ops.pack3(&y, &xh, &xn, XH, 3);
-        let h = self.blocks_forward(&self.blocks, &seq, 3, 0)?;
+        self.ops
+            .pack3_into(&y, &xh, &xn, &self.scratch.seq, XH, 3);
+        let h = self.blocks_forward(&self.blocks, &self.scratch.seq, 3, 0)?;
         let fin = self.rms(&h, &self.fin_norm, 3);
+        // The returned buffer must stay unique: callers hold it until their own
+        // readback, so a shared scratch output would be overwritten by the next
+        // forward before they observe it.
         self.mrow(&self.fin_lin, &fin, 3)
     }
 
@@ -285,8 +406,9 @@ impl DitEngine {
         let ce_n = self.mrow(&self.c_emb, &self.zero_c, 1)?;
         let y_c = self.add(&tm2, &ce_c, XH);
         let y_n = self.add(&tm2, &ce_n, XH);
-        let seq = self.ops.pack6(&y_c, &xh, &xn, &y_n, XH);
-        let h = self.blocks_forward(&self.blocks, &seq, 6, 3)?;
+        self.ops
+            .pack6_into(&y_c, &xh, &xn, &y_n, &self.scratch.seq, XH);
+        let h = self.blocks_forward(&self.blocks, &self.scratch.seq, 6, 3)?;
         let fin = self.rms(&h, &self.fin_norm, 6);
         self.mrow(&self.fin_lin, &fin, 6)
     }
@@ -367,8 +489,9 @@ impl DitEngine {
         let xb = self.gpu.upload_f32(latent, "agg.latent");
         let xn = self.mrow(&self.agg_x_emb, &xb, 1)?;
         // seq [2, 1024] = [cls, x] -- only the first two rows are read
-        let seq = self.ops.pack3(&self.agg_word, &xn, &xn, XH, 2);
-        let h = self.blocks_forward(&self.agg_blocks, &seq, 2, 0)?;
+        self.ops
+            .pack3_into(&self.agg_word, &xn, &xn, &self.scratch.seq, XH, 2);
+        let h = self.blocks_forward(&self.agg_blocks, &self.scratch.seq, 2, 0)?;
         let fin = self.rms(&h, &self.agg_fin_norm, 2);
         // project both rows on the device, then read back only the cls row
         let out = self.mrow(&self.agg_fin_lin, &fin, 2)?;

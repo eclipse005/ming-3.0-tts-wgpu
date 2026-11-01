@@ -321,6 +321,7 @@ mod gemm_bench {
             b: gpu.upload_f32(&b, "bench.b"),
             rows,
             in_features: inf,
+            id: 0,
         }
     }
 

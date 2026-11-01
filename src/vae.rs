@@ -47,7 +47,7 @@ impl VaeEncoder {
                 Ok(bt) => gpu.upload_f32(&bt.to_f32()?, "lin.b"),
                 Err(_) => gpu.upload_f32(&vec![0.0; rows], "lin.b0"),
             };
-            Ok(Lin { w: wbuf, b: bbuf, rows, in_features: inf })
+            Ok(Lin { w: wbuf, b: bbuf, rows, in_features: inf, id: 0 })
         };
         let qlayer = |base: &str| -> Result<QwenLayer> {
             Ok(QwenLayer {
