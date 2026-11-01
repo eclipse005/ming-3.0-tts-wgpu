@@ -248,8 +248,23 @@ pub struct Ops {
     k_linear_t4: crate::nn::Kernel,
     k_linear_t8: crate::nn::Kernel,
     k_linear_v4: crate::nn::Kernel,
+    k_linear_t1hw: crate::nn::Kernel,
+    t1_halfwarp: bool,
     k_linear_v4t6: crate::nn::Kernel,
     k_linear_t8u4: crate::nn::Kernel,
+    k_linear_t8u4_base: crate::nn::Kernel,
+    k_linear_t6v2: crate::nn::Kernel,
+    k_linear_t6hw: crate::nn::Kernel,
+    k_linear_t6qw: crate::nn::Kernel,
+    k_linear_t6fl: crate::nn::Kernel,
+    t6_specialized: bool,
+    t6_paired: bool,
+    t6_halfwarp: bool,
+    t6_quarterwarp: bool,
+    t6_fourlane: bool,
+    t6_hybrid: bool,
+    k_prefill_tile: crate::nn::Kernel,
+    prefill_tiled: bool,
     k_rope: crate::nn::Kernel,
     k_attend: crate::nn::Kernel,
     k_kv_write: crate::nn::Kernel,
@@ -269,8 +284,23 @@ impl Ops {
             k_linear_t4: kernel(&gpu, shaders::GEMV_MROW_T4, 3),
             k_linear_t8: kernel(&gpu, shaders::GEMV_MROW_T8, 3),
             k_linear_v4: kernel(&gpu, shaders::GEMV_V4_T1, 3),
+            k_linear_t1hw: kernel(&gpu, &shaders::gemv_t1_halfwarp(), 3),
+            t1_halfwarp: std::env::var("MING_T1").map_or(true, |v| v != "base"),
             k_linear_v4t6: kernel(&gpu, shaders::GEMV_V4_T6, 3),
-            k_linear_t8u4: kernel(&gpu, shaders::GEMV_MROW_T8U4, 3),
+            k_linear_t8u4: kernel(&gpu, &shaders::gemv_t6u4(), 3),
+            k_linear_t8u4_base: kernel(&gpu, shaders::GEMV_MROW_T8U4, 3),
+            k_linear_t6v2: kernel(&gpu, shaders::GEMV_T6_PAIRED, 3),
+            k_linear_t6hw: kernel(&gpu, &shaders::gemv_t6_halfwarp(), 3),
+            k_linear_t6qw: kernel(&gpu, &shaders::gemv_t6_quarterwarp(), 3),
+            k_linear_t6fl: kernel(&gpu, &shaders::gemv_t6_fourlane(), 3),
+            t6_specialized: std::env::var("MING_T6").map_or(true, |v| v != "base"),
+            t6_paired: std::env::var("MING_T6").map_or(true, |v| v != "base" && v != "spec"),
+            t6_halfwarp: std::env::var("MING_T6").is_ok_and(|v| v == "v3"),
+            t6_quarterwarp: std::env::var("MING_T6").is_ok_and(|v| v == "v4"),
+            t6_fourlane: std::env::var("MING_T6").is_ok_and(|v| v == "v5"),
+            t6_hybrid: std::env::var("MING_T6").map_or(true, |v| v == "hybrid"),
+            k_prefill_tile: kernel(&gpu, shaders::GEMM_PREFILL_48X64, 3),
+            prefill_tiled: std::env::var("MING_PREFILL").map_or(true, |v| v != "base"),
             k_rope: kernel(&gpu, shaders::ROPE, 2),
             k_attend: kernel(&gpu, shaders::ATTEND, 3),
             k_kv_write: kernel(&gpu, shaders::KV_WRITE, 1),
@@ -307,13 +337,58 @@ impl Ops {
     }
 
     pub fn linear_into(&self, lin: &Lin, x: &Buffer, y: &Buffer, t: usize) {
+        // Long prompts are wide enough to amortise a real 2D tile. The generic
+        // path below still covers odd shapes and remains available via
+        // MING_PREFILL=base for A/B.
+        if self.prefill_tiled
+            && t >= 16
+            && lin.rows % 64 == 0
+            && lin.in_features % 32 == 0
+            // The 896x4864 down projection only yields 14 N tiles, so the tiled
+            // grid cannot fill all SMs; the generic token-parallel kernel wins.
+            && !(lin.rows < 1024 && lin.in_features >= 4096)
+        {
+            self.k_prefill_tile.run(
+                &self.gpu,
+                &uni4(
+                    lin.rows as u32,
+                    lin.in_features as u32,
+                    t as u32,
+                    (lin.in_features / 8) as u32,
+                ),
+                &[&lin.w, x, &lin.b],
+                y,
+                (lin.rows / 64) as u32,
+                (t.div_ceil(48)) as u32,
+            );
+            return;
+        }
         if t == 6 && lin.in_features % 256 == 0 {
-            self.k_linear_t8u4.run(
+            // Four lanes/row wins the isolated K=4096 microbench but only emits
+            // 16 workgroups for a [1024, 4096] layer, so it under-fills the 20
+            // SMs and loses 15% end-to-end. Keep it behind MING_T6=v5 only.
+            let use_four = self.t6_fourlane;
+            let use_quarter = self.t6_quarterwarp
+                || (self.t6_hybrid && lin.in_features <= 2048);
+            let (k, per_wg) = if use_four {
+                (&self.k_linear_t6fl, 64)
+            } else if use_quarter {
+                (&self.k_linear_t6qw, 32)
+            } else if self.t6_halfwarp {
+                (&self.k_linear_t6hw, 16)
+            } else if self.t6_paired {
+                (&self.k_linear_t6v2, 8)
+            } else if self.t6_specialized {
+                (&self.k_linear_t8u4, 8)
+            } else {
+                (&self.k_linear_t8u4_base, 8)
+            };
+            k.run(
                 &self.gpu,
                 &uni4(lin.rows as u32, (lin.in_features / 2) as u32, 6, 0),
                 &[&lin.w, x, &lin.b],
                 y,
-                ((lin.rows + 7) / 8) as u32,
+                lin.rows.div_ceil(per_wg) as u32,
                 1,
             );
             return;
@@ -332,14 +407,32 @@ impl Ops {
         }
         // Single-token decode: vec4 (16 B) weight loads instead of one u32.
         if t == 1 && lin.in_features % 8 == 0 && lin.rows % 8 == 0 {
-            self.k_linear_v4.run(
-                &self.gpu,
-                &uni2(lin.rows as u32, (lin.in_features / 8) as u32),
-                &[&lin.w, x, &lin.b],
-                y,
-                (lin.rows / 8) as u32,
-                1,
-            );
+            // Half-warp only pays when both dimensions are small (LLM q/k/v/o).
+            // Wide projections already saturate memory, and long K doubles the
+            // per-lane work without buying occupancy.
+            if self.t1_halfwarp
+                && lin.rows <= 1024
+                && lin.in_features <= 1024
+                && lin.rows % 16 == 0
+            {
+                self.k_linear_t1hw.run(
+                    &self.gpu,
+                    &uni2(lin.rows as u32, (lin.in_features / 8) as u32),
+                    &[&lin.w, x, &lin.b],
+                    y,
+                    (lin.rows / 16) as u32,
+                    1,
+                );
+            } else {
+                self.k_linear_v4.run(
+                    &self.gpu,
+                    &uni2(lin.rows as u32, (lin.in_features / 8) as u32),
+                    &[&lin.w, x, &lin.b],
+                    y,
+                    (lin.rows / 8) as u32,
+                    1,
+                );
+            }
             return;
         }
         let kt = if t <= 4 {

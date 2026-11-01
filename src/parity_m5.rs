@@ -370,6 +370,55 @@ mod gemm_bench {
         }
     }
 
+    /// Tiled prefill must match the generic kernel and should be faster.
+    #[test]
+    fn prefill_tile_matches_generic() {
+        let gpu = Gpu::new().unwrap();
+        let old_env = std::env::var("MING_PREFILL").ok();
+        std::env::set_var("MING_PREFILL", "base");
+        let generic = Ops::new(gpu.clone());
+        match old_env {
+            Some(v) => std::env::set_var("MING_PREFILL", v),
+            None => std::env::remove_var("MING_PREFILL"),
+        }
+        let tiled = Ops::new(gpu.clone());
+        let t = 43;
+        for (rows, inf) in [(896usize, 896usize), (4864, 896), (896, 4864), (1024, 1024)] {
+            let lin = lin_of(&gpu, rows, inf);
+            let xv: Vec<f32> = (0..t * inf)
+                .map(|j| ((j % 31) as f32 - 15.0) * 0.023)
+                .collect();
+            let x = gpu.upload_f32(&xv, "prefill.x");
+            let ya = generic.linear(&lin, &x, t).unwrap();
+            let yb = tiled.linear(&lin, &x, t).unwrap();
+            let a = gpu.read_f32(&ya, t * rows).unwrap();
+            let b = gpu.read_f32(&yb, t * rows).unwrap();
+            let e = rel_l2(&a, &b);
+            println!("  prefill {rows}x{inf} t={t}: rel_l2={e:.3e}");
+            assert!(e < 1e-5, "{rows}x{inf}: {e:.3e}");
+
+            for _ in 0..2 {
+                std::hint::black_box(generic.linear(&lin, &x, t).unwrap());
+                std::hint::black_box(tiled.linear(&lin, &x, t).unwrap());
+            }
+            gpu.flush();
+            let iters = 4;
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                std::hint::black_box(generic.linear(&lin, &x, t).unwrap());
+            }
+            gpu.flush();
+            let a_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                std::hint::black_box(tiled.linear(&lin, &x, t).unwrap());
+            }
+            gpu.flush();
+            let b_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
+            println!("    generic {a_us:8.1} us | tiled {b_us:8.1} us | {:.2}x", a_us / b_us);
+        }
+    }
+
     /// What the linear kernel actually sustains, against the ~268 GB/s that the
     /// qwen3-asr port measured on this same card for the same kind of GEMV.
     #[test]

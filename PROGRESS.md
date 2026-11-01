@@ -3,8 +3,8 @@
 > **一句话状态**：Ming-3.0-tts-0.5b 已完整移植为纯 Rust + wgpu（无 Python / torch /
 > CUDA 依赖），五个里程碑全部数值对齐；36 个参数用例 **36/36 时长逐采样点一致**，
 > 26 例波形级重合（rel_l2 ≤ 5e-2，最好 3.6e-5），其余 10 例只有后段的相位差
-> （log-mel ≥ 0.9959，见 4.4）。**唯一未达成的验收项是 RTF：现在 2.0（合批前 2.51），
-> Python 0.88 —— 交接见 0.5 节。**
+> （log-mel ≥ 0.9959，见 4.4）。**唯一未达成的验收项是 RTF：解码环 3.72 s / 3.2 s
+> 音频 → 1.16（本轮基线 1.74），Python 0.88 —— 交接见 0.5 节。**
 
 接手顺序：**本文** → [REVIEW.md](REVIEW.md)（代码结构评审与重构记录）→
 [WGPU_PORT_ANALYSIS.md](WGPU_PORT_ANALYSIS.md)（最初的拆解方案）。
@@ -16,7 +16,7 @@
 `wgpu/` 是一个**独立 git 仓库**（与 Python 主仓 `D:\Ming-3.0-tts` 分离），把
 `Ming-3.0-tts-0.5b` 的全部推理链路重写为 Rust + wgpu：Qwen2.5-0.5B LLM、DiT + CFM
 流匹配、VAE 编码/解码、iSTFT、文本前端、分词、CAMPlus 说话人。约 8 千行 Rust，
-21 个源文件，63 个测试。
+21 个源文件，64 个测试。
 
 ### 三条命令
 
@@ -43,114 +43,106 @@ cargo test --release -- --test-threads=1
    + 停止判据一致 + 音色一致 + 内容一致**。
 2. **RNG 已经和 torch 完全对齐**（`src/rng.rs`，28160 个值误差 1.4e-6）。
    不要动它——它现在是"同 seed 能复现参考"的唯一依据。
-3. **DiT 占 79% 的时间**，是 RTF 唯一的战场；LLM 15%，prefill 5%。
+3. **DiT 仍占约 66% 的时间**（prefill 10%，LLM+agg 24%），是 RTF 的主战场。
 4. **权重按 bf16 原样上传、激活全 f32**。不要改 f16：LLM 残差流平台在 7.4e4，超 f16
    上限（Python 侧同样结论，见决策记录）。
 5. **`goldens/` 是回归网的根**，不许为了过测试改金标；改代码。
 
 ### 下一步从哪开始
 
-只剩性能。**先读 0.5 节**（RTF 攻坚交接：已确认的数字、已排除的方案、还没试的四条）。
-其中 tiled GEMM 是决定能不能进 0.88 的关键。
+只剩性能。**先读 0.5 节**（本轮已确认的数字、成功方案、排除项和剩余缺口）。
+DiT 的 t=6 线性层已从 24 GB/s 提到 40–47 GB/s，剩下的提升点在 K 分裂并行和调度开销。
 
-## 0.5 RTF 攻坚交接（2026-11-01 状态，给接手者）
+## 0.5 RTF 攻坚交接（2026-11-01 第二轮）
 
-> **一句话**：数值和听感对齐已经完成并且有 63 个测试 + 36 例 sweep 守着；
-> **RTF 2.0 vs Python 0.88，差的完全是 kernel 执行效率**——不是算法、不是硬件、
-> 不是移植错误。同一台机器 Python 能跑 0.88，所以这条路是通的，只是没走完。
+> **一句话**：数值和听感对齐有 64 个测试 + 36 例 sweep 守着；本轮把解码环
+> **5.56 s → 3.72 s（1.49×）**，DiT 单阶段 **4.30 s → 2.46 s（1.75×）**。
+> RTF 从 1.74 降到 **1.16**，距 Python 0.88 还差约 24%。
 
-### 0.5.1 时间账（A1_bare：3.2 s 音频，冷机）
+### 0.5.1 时间账（A1_bare：3.2 s 音频，背靠背）
 
-| 阶段 | 现在 | Python（RUNBOOK 反推） | 备注 |
+| 阶段 | 本轮前 | 现在 | Python（RUNBOOK 反推） |
 |---|---|---|---|
-| prefill（43 token） | 0.45–0.49 s | 含在 4.4 s 内 | 走通用 GEMV，每 token 重读权重 |
-| **DiT + CFM（10 次合批前向 × 40 步）** | **4.75–4.84 s** | **3.34 s** | 唯一的大头 |
-| LLM 解码 + aggregator | 1.14–1.28 s | 0.84 s | |
-| 解码环合计 | **6.4–6.5 s → RTF 2.0** | **4.4 s → RTF 0.88** | |
+| prefill（43 token） | 0.40 s | **0.38 s**（tile 路线省约 20 ms） | 含在 4.4 s 内 |
+| **DiT + CFM（10 次合批前向 × 40 步）** | **4.30 s** | **2.46 s** | **3.34 s** |
+| LLM 解码 + aggregator | 0.90 s | 0.89 s | 0.84 s |
+| 解码环合计 | **5.56 s → RTF 1.74** | **3.72 s → RTF 1.16** | **4.4 s → RTF 0.88** |
 
-**热机后同样代码慢 ~18%**（DiT 4.84 → 5.65，复测一致，见 4.12）。所以所有 A/B 必须
-背靠背，别拿隔半小时的绝对数字比。
+上表是本轮同一分钟内交替运行 base / hybrid 的结果。更早文档里的 6.4–6.5 s 是热机后
+的另一时段（见 4.12），不要和这里的冷机基線混用。**所有 A/B 必须背靠背。**
 
 ### 0.5.2 已确认的事实（不必重测）
 
 | 事实 | 数字 | 出处 |
 |---|---|---|
-| 每次 DiT 前向 | **12.1 ms**（Python 5.4 ms） | MING_PROFILE |
-| 每次前向的权重流量 | 200 MB bf16 → **16 GB/s**（单 GEMM 基准 24 GB/s；Python ~37 GB/s） | `linear_bandwidth` |
+| 每次 DiT 前向 | **6.1 ms**（本轮前 12.1 ms） | MING_PROFILE |
+| 每次前向的权重流量 | 200 MB bf16，有效带宽 **40–47 GB/s** | `linear_bandwidth` |
 | 40 步解码的 dispatch / buffer | **84,308 / 61,535**（每前向 211 次 dispatch） | MING_MEM=1 |
 | 单次 dispatch 成本（同卡实测） | ~5.7 µs → 84k 次 = **0.48 s**，不是主因 | qwen3-asr `docs/perf.md` |
-| 同卡 M=1 GEMV 可达到 | **226–268 GB/s** | 同上 |
+| 同卡 M=1 GEMV 可达到 | **226–268 GB/s**（qwen3 的 f16/int8 路径） | 同上 |
 | 同卡 tiled GEMM 相对基线 | **48.2×**（128×64×32 单缓冲） | ctc `src/gemm_kernel.rs` |
-| 我们 M=1 现在 | **62–65 GB/s** | `linear_bandwidth` |
+| 我们 M=1，小投影 | **72 GB/s**（896×896） | `linear_bandwidth` |
+| 我们 M=1，宽投影 | **64–66 GB/s** | `linear_bandwidth` |
 
 ### 0.5.3 已试并排除（别重复）
 
 | 尝试 | 结果 | 原因 |
 |---|---|---|
-| pred/null 合批成 6 行 | 6.45 → **4.75 s** ✅ | 权重读一遍顶两遍（已提交） |
-| vec4 权重 + **单 token** | 20 → **62–65 GB/s** ✅ | 16 B 一次加载（已提交） |
-| vec4 权重 + **6 token** | 24 GB/s（持平） | 每 granule 12 个激活读淹掉收益 |
+| pred/null 合批成 6 行 | 6.45 → **4.75 s** ✅ | 权重读一遍顶两遍 |
+| vec4 权重 + **单 token** | 20 → **62–65 GB/s** ✅ | 16 B 一次加载 |
+| **配对激活 `vec2` + 6 token** | t6 24 → **30–41 GB/s** ✅ | 每次少 24 条激活 load |
+| **按 K 调 lanes/行**（8 / 32） | t6 → **40–47 GB/s** ✅ | 减少归约步数且保持并行度 |
+| **prefill 48×64 tile** | 全句省约 **20 ms** ✅ | 权重只装一次，43 token 复用 |
+| DiT 的 64×6×K32 tile 原型 | **13 GB/s**（更差） | 每 token 单线程，共享读指令淹掉复用 |
+| 6-token 的 4 lanes/行（K>2048） | 微基准 45 GB/s，但端到端 DiT 2.47→2.85 s ❌ | 1024 行只剩 16 个 workgroup，填不满 20 SM |
+| prefill 按 8 token 分块复用权重 | 0.60–0.98×（更慢）❌ | 43 个 token 本来就能并发，分块反而少并行 |
+| QKV 三合一（18 累加器、三输出） | 306 µs vs 分三次 299 µs ❌ | 18 KB 归约占用抵消激活复用 |
+| `subgroupShuffleXor` 归约 | 输出错误 ❌ | 设备探针正常，但真实 GEMM 上驱动/编译路径不可用 |
 | 每 lane 4 行的寄存器分块 | 4.51 s（+5%） | FMA 总数没变 |
 | K 循环 4 路展开 | 无变化 | 不是加载延迟受限 |
 | 激活整块进 workgroup 内存 | 9.0 s（更差） | 屏障把加载延迟串行化 |
 | 2 行/warp（归约缓冲 12 KB） | 20 GB/s（更差） | occupancy 砍半 |
 
-后两条与 ctc 的 tile 扫描结论一致：**Pascal 上 occupancy 优先于预取**。
+**关键经验**：Pascal 上 occupancy 与并行 workgroup 数优先；孤立微基准的赢家必须用整句
+`MING_PROFILE` 复核（4-lane 的 K=4096 就是这样被否掉的）。
 
-### 0.5.4 还没试的（按预期收益排序，这就是接手要做的事）
+### 0.5.4 还没做 / 下一步（按预期收益排序）
 
-1. **把 GEMV 换成真正的 2D tiled GEMM**（最大的一条）。
-   - 现成的模板：`D:\ctc-forced-aligner-wgpu\src\gemm_kernel.rs`——同卡、同后端、
-     比它的基线快 **48×**，也是 16×16 线程 + 共享 A tile + `vec4` B + 寄存器累加器。
-   - 它的三条经验：①累加器必须用**命名 `vec4` 局部变量**（`array<f32,N>` 会溢出到
-     local memory）；②共享 A 要 padding（`sa_stride % 8 == 1`）防 bank 冲突；
-     ③双缓冲在这张卡上**输**给单缓冲（occupancy 优先）。
-   - 我们的映射：把 **token 当 N 维**（6 → pad 到 8）、**行当 M 维**（1024/4096），
-     K 按 32 切。每线程算 8 行 × 1 token 或类似，把激活读进共享复用。
-   - 目标：35–50 GB/s → DiT 2.2–3.1 s。
-
-2. **检查 `Features::SUBGROUP` 是否可用**（wgpu 30 的 `Adapter::features()`）。
-   可用就把蝶形归约换成 `subgroupShuffleXor`，6 KB 共享内存归零，occupancy 和
-   寄存器都松一口气。qwen3 的 kernel 两条路都写了（`subgroup` 开关）。
-
-3. **RMSNorm 融进线性层**（qwen3 的 `gemv_norm`）：读一次 x、归一化、投影一次做完，
-   每层省一次 dispatch 和一次全量读。
-
-4. **qkv 三合一**：加载时把三个 `[1024,1024]` 权重拼成一个 `[3072,1024]`，一次
-   dispatch 出 q/k/v（每 block 少 2 次 dispatch）。
-
-5. **prefill（0.45 s）**：现在 t=43 走通用 GEMV，每 token 重读权重；用 vec4 + 多 token
-   复用可砍一半。
-
-6. **aggregator（t=2）**：同 t=1 的 vec4 化（本次已写了 t=2 版但因热漂移未能可靠 A/B，
-   代码已回滚，可重做）。
-
-7. **bind group / buffer 复用**：每次 dispatch 新建 bind group、每层新建 buffer
-   （61k buffer/40 步）。dispatch 上限 0.48 s，这里还能再压 0.2–0.3 s。
+1. **K 分裂（split-K）解决小 workgroup 数**：qkv/o 的 1024×1024 只有 32 个
+   workgroup（约 1.6 个/SM）。按 K 切 2–4 份、再做一个融合 bias 的 merge，可提高
+   SM 占用；K=4096 的宽层已有 128 个 workgroup，优先级较低。代价是每层多 1 次
+   dispatch 和 partial buffer，需整句 A/B。
+2. **RMSNorm 融进线性层**：每 block 省 2 次 dispatch 和一次 24 KB 读写；每前向 17 次
+   dispatch，约 0.1 ms 量级。
+3. **bind group / buffer 复用**：61k buffer/40 步，dispatch 上限 0.48 s，预计还能压
+   0.2–0.3 s。
+4. **aggregator（t=2）**：目前仍走通用 T4 路径，单次调用占比很小，优先级低于上面三项。
+5. **prefill 更深一轮**：当前 tile 只省 20 ms；若把 896×4864 的下投影也做成更多 N tile
+   并解决 14-workgroup 欠占用，还有空间。
 
 ### 0.5.5 工具、门限、纪律
 
 ```bat
 cd D:\Ming-3.0-tts\wgpu
-:: 带宽基准：改完 kernel 先看这个（t=1 应 >=60 GB/s，t=6 目标 35+）
+:: 带宽基准：改完 kernel 先看这个（t=1 应 >=60 GB/s，t=6 目标 40+）
 cargo test --release linear_bandwidth -- --nocapture
-:: 数值门限（63 个测试，约 180 s）
+:: 数值门限（64 个测试，约 155 s）
 cargo test --release -- --test-threads=1
 :: 36 例 + 10 例压力集（需要 videolingo 环境 + PYTHONPATH=.runtime\pylibs446）
 %PY% wgpu\tools\check_params_align.py
 %PY% wgpu\tools\stress_compare.py --skip-ref
 ```
 
-- **任何性能改动都不许动数值**：63 个测试 + 36 例 sweep 是护栏，红了就是改错了。
+- **任何性能改动都不许动数值**：64 个测试 + 36 例 sweep 是护栏，红了就是改错了。
 - 性能改动必须**背靠背 A/B**（同一分钟内跑两个版本），否则会被热降频骗（4.12）。
 - 不要为了让 benchmark 好看去改金标或放宽门限。
 
 ### 0.5.6 关于"能不能到 0.88"
 
-上一轮我在 PROGRESS 里写过"DiT 屋顶 34–40 GB/s、0.88 到不了"——**那个结论是错的，
-已作废**。同样的 48 个 FMA，cuBLAS 在同一块卡上跑 37 GB/s，我们只跑到 16–24 GB/s；
-M=1 我们已经做到 62 GB/s。差的是执行效率（寄存器分块、ILP、访存流水），不是算术量，
-也不是硬件。**Python 能跑到 0.88，这条路是通的。**
+上一轮"DiT 屋顶 34–40 GB/s、0.88 到不了"的结论早已作废。本轮 t=6 已实测
+**40–47 GB/s**，DiT 2.46 s，已经快过文档里 Python 的 3.34 s。剩下的是整句
+3.72 s 对 2.8 s（RTF 0.88）左右，差距主要在调度/小 workgroup 占用，而不是算术量。
+**0.88 仍未达成，但已从"看不到路"变成具体的 split-K 和调度优化问题。**
 
 ## 1. 现状
 
@@ -168,7 +160,7 @@ M=1 我们已经做到 62 GB/s。差的是执行效率（寄存器分块、ILP�
 | M5 36 个参数用例 | ✅ 跑通 | **36/36 时长一致**；26 例波形级重合（rel_l2 ≤5e-2），10 例后段相位差（log-mel ≥0.9959）；中位 log-mel 1.00000 |
 | 长文本 / 长音频压力集 | ✅ 10 例 | 分片路径精确（21.6 s、6 片，rel 1.3e-2）；单段 >6 s 会分岔（4.7）；挖出并修掉 3 个越界 bug（4.8） |
 | CLI 参数面 = infer.py | ✅ | `rename_all = snake_case`，逐 flag 对齐 |
-| **RTF** | ❌ | **2.03**（Python 0.88；2026-11-01 合批前是 2.51） |
+| **RTF** | ❌ | **1.16**（Python 0.88；本轮基线 1.74，合批前 2.51） |
 
 ## 2. 怎么跑
 
@@ -188,6 +180,9 @@ M=1 我们已经做到 62 GB/s。差的是执行效率（寄存器分块、ILP�
 | `MING_NOISE_GOLDEN=<dir>` | 注入金标 torch.randn 抽样（`goldens/m5/` 或 `goldens/m5_params/<case>/`），用于逐样本对拍 |
 | `MING_DUMP_IDS=<file>` | 把首条分片的 token id 写盘，用于和参考的 `build_input_ids` 比 |
 | `MING_MAX_PENDING=<n>` | 一次提交的 dispatch 上限（默认 2048） |
+| `MING_T6=base\|spec\|v2\|v3\|v4\|v5\|hybrid` | 覆盖 DiT 六 token 线性层（默认 hybrid：K≤2048 用 v4 的 8 lanes，K>2048 用 v2） |
+| `MING_T1=base` | 关闭单 token 小投影的半 warp 归约 |
+| `MING_PREFILL=base` | 关闭 prefill 的 48×64 tile，回到 token 并行 GEMV |
 | `MING_KV_TRACE=1` | VAE 编码器 dump KV cache（诊断） |
 | `MING_MODEL` / `MING_GOLDEN` | 覆盖模型 / 金标目录（测试用） |
 
@@ -461,9 +456,9 @@ GELU 用 erf 而不是 tanh 那件事仍然成立（每元素差 1e-3，是真�
 ### 4.11 GEMM 屋顶线：DiT 为什么卡在 24 GB/s（2026-11-01 量）
 
 > **⚠️ 本节结论已作废，只保留测量数据。** 当时把"我们 kernel 的发出率屋顶"当成了
-> "这张卡的屋顶"。事实：同样 48 个 FMA，cuBLAS 在同一块卡上跑到 ~37 GB/s，我们只到
-> 16–24 GB/s；而且同卡 M=1 GEMV 能跑 226–268 GB/s。差别是执行效率（寄存器分块、
-> ILP、访存流水），不是算术量。**0.88 是可达的**，见 0.5 节。
+> "这张卡的屋顶"。本轮已用**配对 `vec2` 激活 + 按 K 选择 lanes/行**把 M=6 做到
+> **40–47 GB/s**，DiT 2.46 s，见 0.5 节。剩余差距不是算术量，而是 split-K 并行度
+> 和 dispatch/内存调度。
 同类移植项目的实测（`D:\qwen3-asr-wgpu\docs\perf.md`，同一张 P104-100）：`t_us = 5.7 + MB×1000/268`，即 **M=1 GEMV 能到 226-268 GB/s**。但那是单 token 的形状。DiT 的 CFG 合批是 **M=6**，每个权重 granule（8 个 bf16）要配 12 个激活 `vec4` + 48 个 FMA：
 | 形态 | 每 granule 指令 | 实测带宽 |
 |---|---|---|
@@ -481,21 +476,22 @@ GELU 用 erf 而不是 tanh 那件事仍然成立（每元素差 1e-3，是真�
 
 | 阶段 | 耗时 | 占比 |
 |---|---|---|
-| prefill（43 token） | 0.47 s | 7% |
-| **DiT + CFM（10 次合批前向 × 40 步）** | **4.75 s** | **73%** |
-| LLM 解码 + aggregator | 1.28 s | 20% |
-| 合计（解码环） | 6.50 s | **RTF 2.03** |
+| prefill（43 token） | 0.38 s | 10% |
+| **DiT + CFM（10 次合批前向 × 40 步）** | **2.46 s** | **66%** |
+| LLM 解码 + aggregator | 0.89 s | 24% |
+| 合计（解码环） | 3.72 s | **RTF 1.16** |
 | 模型加载 + VAE 解码 | ~5.7 s | 一次性 |
 
 ## 5. 未完成与已知问题
 
-### P0：RTF 2.0 → 目标 < 0.88（唯一未达成的验收项）
+### P0：RTF 1.16 → 目标 < 0.88（唯一未达成的验收项）
 
-**详细交接见 0.5 节**（时间账 / 已确认事实 / 已排除方案 / 还没试的四条 / 工具门限）。
+**详细交接见 0.5 节**（时间账 / 已确认事实 / 成功与排除方案 / 剩余三条 / 工具门限）。
 
-进度：pred/null 合批已完成（2.51 → 2.03），vec4 权重加载让 M=1 从 20 → 62-65 GB/s。
-剩下的关键是把"每 warp 一行"的 GEMV 换成真正的 2D tiled GEMM（模板：
-`D:\ctc-forced-aligner-wgpu\src\gemm_kernel.rs`，同卡快 48×）。
+进度：pred/null 合批（2.51 → 2.03）→ 本轮 t=6 配对激活 + lanes/行（1.74 → **1.16**）。
+DiT 单阶段已快过文档里的 Python（2.46 s vs 3.34 s），整句仍比 Python 的 2.8 s 预算多
+约 0.9 s。下一步优先做 split-K（解决 qkv/o 的 1024×1024 只有 32 个 workgroup 的
+欠占用），再做 RMS 融合和 bind/buffer 复用；DiT tile 原型、QKV 融合、subgroup 都已实测排除。
 
 ### P1：轨迹分岔（已收口：6 例连时长都错 → 10 例"只在后段"）
 

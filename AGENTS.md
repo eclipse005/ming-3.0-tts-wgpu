@@ -9,7 +9,7 @@
 ```bat
 cd D:\Ming-3.0-tts\wgpu
 cargo build --release
-cargo test --release -- --test-threads=1        :: 59 个测试，约 190 s，需要 GPU
+cargo test --release -- --test-threads=1        :: 64 个测试，约 155 s，需要 GPU
 ```
 
 单条合成（参数面与 Python 的 `infer.py` 逐字一致）：
@@ -55,8 +55,9 @@ target\release\ming-tts-wgpu.exe synth ^
 
 ## 当前唯一的未完成项
 
-RTF 2.51，目标是 < 0.88（Python 版）。DiT 占 79% 的耗时。四条优化路线按收益排序写在
-PROGRESS.md 第 5 节 P0，每一条都标了要改哪个文件的哪个函数。
+RTF **1.16**，目标 < 0.88（Python 版）。DiT 占 66%，已从 4.30 s 降到 2.46 s。
+剩余方案按收益排序在 PROGRESS.md 第 5 节 P0；t=6 线性层的 kernel 选择可用
+`MING_T6=base|spec|v2|v3|v4|v5` 覆盖，默认按 K 自动选择。
 
 ```bat
 :: 分段耗时

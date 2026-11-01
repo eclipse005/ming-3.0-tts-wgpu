@@ -385,6 +385,344 @@ fn main(
 }
 "#;
 
+/// [`GEMV_MROW_T8U4`] specialised for the DiT's fixed six-token batch.
+///
+/// Folding `n_tok` at shader-generation time removes 48 uniform predicate
+/// checks per unrolled K step and makes the two unused token groups dead code.
+/// The kernel is only selected when t == 6; other row counts keep the generic
+/// version.
+pub fn gemv_t6u4() -> String {
+    GEMV_MROW_T8U4
+        .lines()
+        // Drop the a6/a7 token groups entirely: every remaining use is guarded
+        // by `n_tok > 6`, which cannot hold for this kernel.
+        .filter(|line| {
+            !(line.contains("a6")
+                || line.contains("a7")
+                || line.contains("[6]")
+                || line.contains("[7]"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("array<array<array<f32, 32>, 8>, 8>", "array<array<array<f32, 32>, 6>, 8>")
+        .replace("p.n_tok", "6u")
+}
+
+/// Six-token linear with paired activation loads.
+///
+/// The scalar kernel loads each token's two adjacent activation values with two
+/// 32-bit loads. Viewing X as `[T, K/2]` of `vec2<f32>` turns those into one
+/// 64-bit load, cutting 24 load instructions per unrolled K step. Weight loads
+/// stay strided so coalescing is unchanged. Requires `in_words % 128 == 0`.
+pub const GEMV_T6_PAIRED: &str = r#"
+struct Params { rows: u32, in_words: u32, n_tok: u32, _pad: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<u32>;
+@group(0) @binding(2) var<storage, read> x: array<vec2<f32>>;   // [T, in_words]
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;
+var<workgroup> red: array<array<array<f32, 32>, 6>, 8>;
+
+fn bf_lo(u: u32) -> f32 { return bitcast<f32>((u & 0xFFFFu) << 16u); }
+fn bf_hi(u: u32) -> f32 { return bitcast<f32>(u & 0xFFFF0000u); }
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let warp = li / 32u;
+    let lane = lid.x % 32u;
+    let row = wg.x * 8u + warp;
+    let inw = p.in_words;
+    var a0 = 0.0;
+    var a1 = 0.0;
+    var a2 = 0.0;
+    var a3 = 0.0;
+    var a4 = 0.0;
+    var a5 = 0.0;
+    if (row < p.rows) {
+        let wb = row * inw;
+        var wi = lane;
+        loop {
+            if (wi + 96u >= inw) { break; }
+            let u0 = w[wb + wi];
+            let u1 = w[wb + wi + 32u];
+            let u2 = w[wb + wi + 64u];
+            let u3 = w[wb + wi + 96u];
+            let l0 = bf_lo(u0); let h0 = bf_hi(u0);
+            let l1 = bf_lo(u1); let h1 = bf_hi(u1);
+            let l2 = bf_lo(u2); let h2 = bf_hi(u2);
+            let l3 = bf_lo(u3); let h3 = bf_hi(u3);
+            let q0 = x[wi];
+            let q1 = x[inw + wi];
+            let q2 = x[2u * inw + wi];
+            let q3 = x[3u * inw + wi];
+            let q4 = x[4u * inw + wi];
+            let q5 = x[5u * inw + wi];
+            a0 = a0 + l0*q0.x + h0*q0.y;
+            a1 = a1 + l0*q1.x + h0*q1.y;
+            a2 = a2 + l0*q2.x + h0*q2.y;
+            a3 = a3 + l0*q3.x + h0*q3.y;
+            a4 = a4 + l0*q4.x + h0*q4.y;
+            a5 = a5 + l0*q5.x + h0*q5.y;
+            let r0 = x[wi + 32u];
+            let r1 = x[inw + wi + 32u];
+            let r2 = x[2u * inw + wi + 32u];
+            let r3 = x[3u * inw + wi + 32u];
+            let r4 = x[4u * inw + wi + 32u];
+            let r5 = x[5u * inw + wi + 32u];
+            a0 = a0 + l1*r0.x + h1*r0.y;
+            a1 = a1 + l1*r1.x + h1*r1.y;
+            a2 = a2 + l1*r2.x + h1*r2.y;
+            a3 = a3 + l1*r3.x + h1*r3.y;
+            a4 = a4 + l1*r4.x + h1*r4.y;
+            a5 = a5 + l1*r5.x + h1*r5.y;
+            let s0 = x[wi + 64u];
+            let s1 = x[inw + wi + 64u];
+            let s2 = x[2u * inw + wi + 64u];
+            let s3 = x[3u * inw + wi + 64u];
+            let s4 = x[4u * inw + wi + 64u];
+            let s5 = x[5u * inw + wi + 64u];
+            a0 = a0 + l2*s0.x + h2*s0.y;
+            a1 = a1 + l2*s1.x + h2*s1.y;
+            a2 = a2 + l2*s2.x + h2*s2.y;
+            a3 = a3 + l2*s3.x + h2*s3.y;
+            a4 = a4 + l2*s4.x + h2*s4.y;
+            a5 = a5 + l2*s5.x + h2*s5.y;
+            let v0 = x[wi + 96u];
+            let v1 = x[inw + wi + 96u];
+            let v2 = x[2u * inw + wi + 96u];
+            let v3 = x[3u * inw + wi + 96u];
+            let v4 = x[4u * inw + wi + 96u];
+            let v5 = x[5u * inw + wi + 96u];
+            a0 = a0 + l3*v0.x + h3*v0.y;
+            a1 = a1 + l3*v1.x + h3*v1.y;
+            a2 = a2 + l3*v2.x + h3*v2.y;
+            a3 = a3 + l3*v3.x + h3*v3.y;
+            a4 = a4 + l3*v4.x + h3*v4.y;
+            a5 = a5 + l3*v5.x + h3*v5.y;
+            wi = wi + 128u;
+        }
+    }
+    red[warp][0][lane] = a0;
+    red[warp][1][lane] = a1;
+    red[warp][2][lane] = a2;
+    red[warp][3][lane] = a3;
+    red[warp][4][lane] = a4;
+    red[warp][5][lane] = a5;
+    workgroupBarrier();
+    var s = 16u;
+    loop {
+        if (s == 0u) { break; }
+        if (lane < s) {
+            red[warp][0][lane] = red[warp][0][lane] + red[warp][0][lane + s];
+            red[warp][1][lane] = red[warp][1][lane] + red[warp][1][lane + s];
+            red[warp][2][lane] = red[warp][2][lane] + red[warp][2][lane + s];
+            red[warp][3][lane] = red[warp][3][lane] + red[warp][3][lane + s];
+            red[warp][4][lane] = red[warp][4][lane] + red[warp][4][lane + s];
+            red[warp][5][lane] = red[warp][5][lane] + red[warp][5][lane + s];
+        }
+        workgroupBarrier();
+        s = s / 2u;
+    }
+    if (lane == 0u && row < p.rows) {
+        let bias = b[row];
+        y[row] = red[warp][0][0] + bias;
+        y[p.rows + row] = red[warp][1][0] + bias;
+        y[2u * p.rows + row] = red[warp][2][0] + bias;
+        y[3u * p.rows + row] = red[warp][3][0] + bias;
+        y[4u * p.rows + row] = red[warp][4][0] + bias;
+        y[5u * p.rows + row] = red[warp][5][0] + bias;
+    }
+}
+"#;
+
+/// Six-token linear with `lanes` threads per output row.
+///
+/// The 32-lane kernel spends five workgroup barriers reducing each row while a
+/// K=1024 matrix only has four unrolled loop steps. Using 16 lanes doubles the
+/// rows per workgroup and cuts the reduction to four steps; 8 lanes reaches
+/// three steps. Paired activation loads are retained from
+/// [`GEMV_T6_PAIRED`].
+fn gemv_t6_lanes(lanes: u32) -> String {
+    assert!(32 % lanes == 0 && 256 % lanes == 0);
+    let rows_per_wg = 256 / lanes;
+    let offsets = [0u32, lanes, 2 * lanes, 3 * lanes];
+    let last_off = 3 * lanes;
+    let stride = 4 * lanes;
+    let first_step = lanes / 2;
+    let mut body = String::new();
+    for off in offsets {
+        body.push_str(&format!(
+            "            let u{off} = w[wb + wi + {off}u];\n\
+             \x20           let l{off} = bf_lo(u{off});\n\
+             \x20           let h{off} = bf_hi(u{off});\n"
+        ));
+        for t in 0..6u32 {
+            let idx = if t == 0 {
+                format!("wi + {off}u")
+            } else {
+                format!("{t}u * inw + wi + {off}u")
+            };
+            body.push_str(&format!(
+                "            let q{off}_{t} = x[{idx}];\n\
+                 \x20           a{t} = a{t} + l{off}*q{off}_{t}.x + h{off}*q{off}_{t}.y;\n"
+            ));
+        }
+    }
+    let mut reduce = String::new();
+    for t in 0..6u32 {
+        reduce.push_str(&format!("            red[rl][{t}][lane] = red[rl][{t}][lane] + red[rl][{t}][lane + s];\n"));
+    }
+    let mut store = String::new();
+    for t in 0..6u32 {
+        let idx = if t == 0 {
+            "row".to_string()
+        } else {
+            format!("{t}u * p.rows + row")
+        };
+        store.push_str(&format!("        y[{idx}] = red[rl][{t}][0] + bias;\n"));
+    }
+    format!(
+        r#"struct Params {{ rows: u32, in_words: u32, n_tok: u32, _pad: u32, }}
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<u32>;
+@group(0) @binding(2) var<storage, read> x: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;
+var<workgroup> red: array<array<array<f32, {lanes}>, 6>, {rows_per_wg}>;
+
+fn bf_lo(u: u32) -> f32 {{ return bitcast<f32>((u & 0xFFFFu) << 16u); }}
+fn bf_hi(u: u32) -> f32 {{ return bitcast<f32>(u & 0xFFFF0000u); }}
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {{
+    let lane = lid.x % {lanes}u;
+    let rl = lid.x / {lanes}u;
+    let row = wg.x * {rows_per_wg}u + rl;
+    let inw = p.in_words;
+    var a0 = 0.0;
+    var a1 = 0.0;
+    var a2 = 0.0;
+    var a3 = 0.0;
+    var a4 = 0.0;
+    var a5 = 0.0;
+    if (row < p.rows) {{
+        let wb = row * inw;
+        var wi = lane;
+        loop {{
+            if (wi + {last_off}u >= inw) {{ break; }}
+{body}            wi = wi + {stride}u;
+        }}
+    }}
+    red[rl][0][lane] = a0;
+    red[rl][1][lane] = a1;
+    red[rl][2][lane] = a2;
+    red[rl][3][lane] = a3;
+    red[rl][4][lane] = a4;
+    red[rl][5][lane] = a5;
+    workgroupBarrier();
+    var s = {first_step}u;
+    loop {{
+        if (s == 0u) {{ break; }}
+        if (lane < s) {{
+{reduce}        }}
+        workgroupBarrier();
+        s = s / 2u;
+    }}
+    if (lane == 0u && row < p.rows) {{
+        let bias = b[row];
+{store}    }}
+}}
+"#
+    )
+}
+
+pub fn gemv_t6_halfwarp() -> String {
+    gemv_t6_lanes(16)
+}
+
+pub fn gemv_t6_quarterwarp() -> String {
+    gemv_t6_lanes(8)
+}
+
+pub fn gemv_t6_fourlane() -> String {
+    gemv_t6_lanes(4)
+}
+
+/// Single-token linear with half a warp per row.
+///
+/// Same vec4 weight/activation granules as [`GEMV_V4_T1`], but two rows share a
+/// warp and the reduction needs four steps instead of five. K=896 matrices in
+/// the LLM decoder only run 3-4 K steps per lane, so the barrier tree is a
+/// visible fraction of the kernel.
+pub fn gemv_t1_halfwarp() -> String {
+    let reduce = "            red[rl][lane] = red[rl][lane] + red[rl][lane + s];\n";
+    format!(
+        r#"struct Params {{ rows: u32, kg: u32, }}
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<vec4<u32>>;
+@group(0) @binding(2) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;
+var<workgroup> red: array<array<f32, 16>, 16>;
+
+fn bf_lo(u: u32) -> f32 {{ return bitcast<f32>((u & 0xFFFFu) << 16u); }}
+fn bf_hi(u: u32) -> f32 {{ return bitcast<f32>(u & 0xFFFF0000u); }}
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {{
+    let warp = li / 32u;
+    let half = (lid.x % 32u) / 16u;
+    let lane = lid.x % 16u;
+    let rl = warp * 2u + half;
+    let row = wg.x * 16u + rl;
+    var a0 = 0.0;
+    var a1 = 0.0;
+    var a2 = 0.0;
+    var a3 = 0.0;
+    if (row < p.rows) {{
+        let wb = row * p.kg;
+        var i = lane;
+        loop {{
+            if (i >= p.kg) {{ break; }}
+            let wv = w[wb + i];
+            let xa = x[2u * i];
+            let xb = x[2u * i + 1u];
+            a0 = a0 + bf_lo(wv.x) * xa.x + bf_hi(wv.x) * xa.y;
+            a1 = a1 + bf_lo(wv.y) * xa.z + bf_hi(wv.y) * xa.w;
+            a2 = a2 + bf_lo(wv.z) * xb.x + bf_hi(wv.z) * xb.y;
+            a3 = a3 + bf_lo(wv.w) * xb.z + bf_hi(wv.w) * xb.w;
+            i = i + 16u;
+        }}
+    }}
+    red[rl][lane] = a0 + a1 + a2 + a3;
+    workgroupBarrier();
+    var s = 8u;
+    loop {{
+        if (s == 0u) {{ break; }}
+        if (lane < s) {{
+{reduce}        }}
+        workgroupBarrier();
+        s = s / 2u;
+    }}
+    if (lane == 0u && row < p.rows) {{
+        y[row] = red[rl][0] + b[row];
+    }}
+}}
+"#
+    )
+}
+
 /// Single-token linear with vec4 weight loads (minimal form, no unrolling).
 ///
 /// One warp per row; a granule is 8 bf16 in one `vec4<u32>` (16 B) plus the
@@ -702,6 +1040,115 @@ fn main(
         if (p.n_tok > 5u) { y[5u * p.rows + row] = red[warp][5][0] + bias; }
         if (p.n_tok > 6u) { y[6u * p.rows + row] = red[warp][6][0] + bias; }
         if (p.n_tok > 7u) { y[7u * p.rows + row] = red[warp][7][0] + bias; }
+    }
+}
+"#;
+
+/// Tiled prefill GEMM: 48 tokens x 64 weight rows x 32 K per workgroup.
+///
+/// The generic prefill kernel dispatches one workgroup per (weight row, token).
+/// It has excellent token parallelism, but each workgroup reads the row's
+/// weights itself; the reads only stay cheap while they hit L2. Here a 16x16
+/// workgroup owns three token rows and four output columns, and a full K tile
+/// of weights is copied to shared memory once. Weight rows in the checkpoint
+/// are [rows, K], so the copy transposes into shared [K, 64] for vec4 reads.
+///
+/// Requires rows % 64 == 0 and K % 32 == 0; other shapes keep the generic path.
+pub const GEMM_PREFILL_48X64: &str = r#"
+struct Params { rows: u32, k: u32, n_tok: u32, kg: u32, }  // kg = K / 8
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<vec4<u32>>;  // [rows, kg], 8 bf16 each
+@group(0) @binding(2) var<storage, read> x: array<f32>;        // [T, K]
+@group(0) @binding(3) var<storage, read> b: array<f32>;        // [rows]
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;  // [T, rows]
+
+var<workgroup> sb: array<f32, 2176>;       // [32, 68] = [K tile, 64 N], one pad
+var<workgroup> sa: array<vec4<f32>, 432>;  // [48, 9] vec4  = [tokens, K tile], one pad
+
+fn bf_lo(u: u32) -> f32 { return bitcast<f32>((u & 0xFFFFu) << 16u); }
+fn bf_hi(u: u32) -> f32 { return bitcast<f32>(u & 0xFFFF0000u); }
+
+@compute @workgroup_size(16, 16)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let n0 = wg.x * 64u;
+    let tok0 = wg.y * 48u;
+    let tid = li;
+    let ktiles = p.k / 32u;
+    var c0 = vec4<f32>(0.0);
+    var c1 = vec4<f32>(0.0);
+    var c2 = vec4<f32>(0.0);
+
+    for (var kt = 0u; kt < ktiles; kt = kt + 1u) {
+        let k0 = kt * 32u;
+        // 64 rows x 4 vec4-per-row = 256 vectors: one per invocation.
+        let nloc = tid / 4u;
+        let kv = tid % 4u;
+        let wv = w[(n0 + nloc) * p.kg + k0 / 8u + kv];
+        let base = kv * 8u;
+        sb[(base + 0u) * 68u + nloc] = bf_lo(wv.x);
+        sb[(base + 1u) * 68u + nloc] = bf_hi(wv.x);
+        sb[(base + 2u) * 68u + nloc] = bf_lo(wv.y);
+        sb[(base + 3u) * 68u + nloc] = bf_hi(wv.y);
+        sb[(base + 4u) * 68u + nloc] = bf_lo(wv.z);
+        sb[(base + 5u) * 68u + nloc] = bf_hi(wv.z);
+        sb[(base + 6u) * 68u + nloc] = bf_lo(wv.w);
+        sb[(base + 7u) * 68u + nloc] = bf_hi(wv.w);
+
+        // 48 tokens x 8 vec4-per-token = 384 vectors.
+        for (var i = tid; i < 384u; i = i + 256u) {
+            let tok = i / 8u;
+            let ak = i % 8u;
+            let gtok = tok0 + tok;
+            var v = vec4<f32>(0.0);
+            if (gtok < p.n_tok) {
+                let src = gtok * p.k + k0 + ak * 4u;
+                v = vec4<f32>(x[src], x[src + 1u], x[src + 2u], x[src + 3u]);
+            }
+            sa[tok * 9u + ak] = v;
+        }
+        workgroupBarrier();
+
+        for (var kv = 0u; kv < 8u; kv = kv + 1u) {
+            let kb = kv * 4u;
+            let ni = lid.x * 4u;
+            let b0 = vec4<f32>(sb[(kb + 0u) * 68u + ni], sb[(kb + 0u) * 68u + ni + 1u], sb[(kb + 0u) * 68u + ni + 2u], sb[(kb + 0u) * 68u + ni + 3u]);
+            let b1 = vec4<f32>(sb[(kb + 1u) * 68u + ni], sb[(kb + 1u) * 68u + ni + 1u], sb[(kb + 1u) * 68u + ni + 2u], sb[(kb + 1u) * 68u + ni + 3u]);
+            let b2 = vec4<f32>(sb[(kb + 2u) * 68u + ni], sb[(kb + 2u) * 68u + ni + 1u], sb[(kb + 2u) * 68u + ni + 2u], sb[(kb + 2u) * 68u + ni + 3u]);
+            let b3 = vec4<f32>(sb[(kb + 3u) * 68u + ni], sb[(kb + 3u) * 68u + ni + 1u], sb[(kb + 3u) * 68u + ni + 2u], sb[(kb + 3u) * 68u + ni + 3u]);
+            let a0 = sa[lid.y * 9u + kv];
+            let a1 = sa[(lid.y + 16u) * 9u + kv];
+            let a2 = sa[(lid.y + 32u) * 9u + kv];
+            c0 = c0 + a0.x*b0 + a0.y*b1 + a0.z*b2 + a0.w*b3;
+            c1 = c1 + a1.x*b0 + a1.y*b1 + a1.z*b2 + a1.w*b3;
+            c2 = c2 + a2.x*b0 + a2.y*b1 + a2.z*b2 + a2.w*b3;
+        }
+        workgroupBarrier();
+    }
+
+    let gn = n0 + lid.x * 4u;
+    let bv = vec4<f32>(b[gn], b[gn + 1u], b[gn + 2u], b[gn + 3u]);
+    let dst = gn;
+    let t0 = tok0 + lid.y;
+    let t1 = tok0 + lid.y + 16u;
+    let t2 = tok0 + lid.y + 32u;
+    if (t0 < p.n_tok) {
+        let o = c0 + bv;
+        let d = t0 * p.rows + dst;
+        y[d] = o.x; y[d + 1u] = o.y; y[d + 2u] = o.z; y[d + 3u] = o.w;
+    }
+    if (t1 < p.n_tok) {
+        let o = c1 + bv;
+        let d = t1 * p.rows + dst;
+        y[d] = o.x; y[d + 1u] = o.y; y[d + 2u] = o.z; y[d + 3u] = o.w;
+    }
+    if (t2 < p.n_tok) {
+        let o = c2 + bv;
+        let d = t2 * p.rows + dst;
+        y[d] = o.x; y[d + 1u] = o.y; y[d + 2u] = o.z; y[d + 3u] = o.w;
     }
 }
 "#;
