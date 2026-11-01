@@ -8,10 +8,11 @@
 #![allow(dead_code)]
 
 use crate::gpu::Gpu;
-use crate::ops::{AttendParams, Lin, Ops, QwenLayer, RopeTables};
+use crate::ops::{AttendParams, KvCache, Lin, Ops, QwenLayer};
 use crate::qwen_lm::{HEAD_DIM, HIDDEN, KV_CAP, KV_HEADS, Q_HEADS, ROPE_THETA};
 use crate::weights::Weights;
 use anyhow::Result;
+use std::cell::RefCell;
 use std::sync::Arc;
 use wgpu::Buffer;
 
@@ -31,9 +32,7 @@ pub struct VaeEncoder {
     fc3: Lin,
     enc_norm: Buffer,
     agg_norm: Buffer,
-    rope: RopeTables,
-    kv_k: Buffer,
-    kv_v: Buffer,
+    kv: RefCell<KvCache>,
     ops: Arc<Ops>,
 }
 
@@ -69,7 +68,7 @@ impl VaeEncoder {
         let agg = (0..AGG_LAYERS)
             .map(|i| qlayer(&format!("audio.encoder.aggregator.layers.{i}")))
             .collect::<Result<Vec<_>>>()?;
-        let rope = RopeTables::new(&gpu, ROPE_THETA, HEAD_DIM, KV_CAP);
+        let kv = RefCell::new(KvCache::new(&gpu, KV_HEADS, HEAD_DIM, ROPE_THETA, KV_CAP));
         Ok(Self {
             fc1: lin("audio.encoder.fc1", HIDDEN, IN_DIM)?,
             fc2: lin("audio.encoder.fc2", HIDDEN, HIDDEN)?,
@@ -79,9 +78,7 @@ impl VaeEncoder {
             enc_norm: gpu.upload_f32(&p("audio.encoder.encoder.norm.weight")?.to_f32()?, "enorm"),
             agg_norm: gpu.upload_f32(&p("audio.encoder.aggregator.norm.weight")?.to_f32()?, "agnorm"),
             fc3: lin("audio.encoder.fc3", 128, HIDDEN)?,
-            rope,
-            kv_k: gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.kv_k"),
-            kv_v: gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "v.kv_v"),
+            kv,
             ops,
             gpu,
         })
@@ -106,20 +103,23 @@ impl VaeEncoder {
     /// Causal Qwen2 stack over `t` tokens at positions 0..t.
     fn stack(&self, layers: &[QwenLayer], x: Buffer, t: usize) -> Result<Buffer> {
         let mut h = x;
+        let mut kv = self.kv.borrow_mut();
+        kv.ensure(&self.gpu, KV_HEADS, HEAD_DIM, ROPE_THETA, t, KV_CAP);
+        let cap = kv.cap;
         for layer in layers {
             let a = self.rms(&h, &layer.n1, t);
             let q = self.mrow(&layer.q, &a, t)?;
             let k = self.mrow(&layer.k, &a, t)?;
             let v = self.mrow(&layer.v, &a, t)?;
             // Qwen2 rotate-half; the audio encoder runs causal + a 64-token window
-            self.ops.rope(&self.rope, &q, Q_HEADS, 0, 0, t);
-            self.ops.rope(&self.rope, &k, KV_HEADS, 0, 0, t);
-            let kc = &self.kv_k;
-            let vc = &self.kv_v;
-            self.ops.kv_write(&k, kc, t, 0, KV_CAP, KV_HEADS);
-            self.ops.kv_write(&v, vc, t, 0, KV_CAP, KV_HEADS);
+            self.ops.rope(&kv.rope, &q, Q_HEADS, 0, 0, t);
+            self.ops.rope(&kv.rope, &k, KV_HEADS, 0, 0, t);
+            let kc = &kv.k;
+            let vc = &kv.v;
+            self.ops.kv_write(&k, kc, t, 0, cap, KV_HEADS);
+            self.ops.kv_write(&v, vc, t, 0, cap, KV_HEADS);
             let attn = self.ops.attend(
-                &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, KV_CAP)
+                &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, cap)
                     .with_window(64),
                 &q,
                 kc,
@@ -194,26 +194,29 @@ impl VaeEncoder {
         out.push(("l0_k_proj".into(), self.gpu.read_f32(&k, t * (KV_HEADS * HEAD_DIM))?));
         out.push(("l0_v_proj".into(), self.gpu.read_f32(&v, t * (KV_HEADS * HEAD_DIM))?));
         // Qwen2 rotate-half; the audio encoder runs causal + a 64-token window
-        self.ops.rope(&self.rope, &q, Q_HEADS, 0, 0, t);
-        self.ops.rope(&self.rope, &k, KV_HEADS, 0, 0, t);
-        let kc = &self.kv_k;
-        let vc = &self.kv_v;
-        self.ops.kv_write(&k, kc, t, 0, KV_CAP, KV_HEADS);
-        self.ops.kv_write(&v, vc, t, 0, KV_CAP, KV_HEADS);
+        let mut kv = self.kv.borrow_mut();
+        kv.ensure(&self.gpu, KV_HEADS, HEAD_DIM, ROPE_THETA, t, KV_CAP);
+        let cap = kv.cap;
+        self.ops.rope(&kv.rope, &q, Q_HEADS, 0, 0, t);
+        self.ops.rope(&kv.rope, &k, KV_HEADS, 0, 0, t);
+        let kc = &kv.k;
+        let vc = &kv.v;
+        self.ops.kv_write(&k, kc, t, 0, cap, KV_HEADS);
+        self.ops.kv_write(&v, vc, t, 0, cap, KV_HEADS);
         if std::env::var("MING_KV_TRACE").is_ok() {
-            let kch = self.gpu.read_f32(kc, KV_HEADS * KV_CAP * HEAD_DIM)?;
+            let kch = self.gpu.read_f32(kc, KV_HEADS * cap * HEAD_DIM)?;
             let mut kk = vec![0f32; t * 128];
             for pos in 0..t {
                 for h in 0..KV_HEADS {
                     for d in 0..64 {
-                        kk[pos * 128 + h * 64 + d] = kch[(h * KV_CAP + pos) * 64 + d];
+                        kk[pos * 128 + h * 64 + d] = kch[(h * cap + pos) * 64 + d];
                     }
                 }
             }
             out.push(("l0_kcache".into(), kk));
         }
         let attn = self.ops.attend(
-            &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, KV_CAP)
+            &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, cap)
                 .with_window(64),
             &q,
             kc,

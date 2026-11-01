@@ -197,7 +197,21 @@ impl Pipeline {
             }
         }
 
-        let budget = (MAX_CACHE_LEN - t) / PATCH.max(1);
+        // The reference decodes against a static 512-position cache:
+        //   decode_budget = (MAX_CACHE_LEN - inputs_embeds.shape[1]) // patch
+        // (modeling_bailingmm.py). With more prompt than cache it computes a
+        // negative budget, so range() is empty and the utterance yields no
+        // audio at all. The subtraction is done in usize here, so it has to be
+        // saturating: --raw_text (no splitting) plus a long paragraph is enough
+        // to reach t >= 512, and wrapping would hand the loop a giant budget
+        // and let it write past the KV cache.
+        let budget = MAX_CACHE_LEN.saturating_sub(t) / PATCH.max(1);
+        if budget == 0 {
+            bail!(
+                "prompt is {t} tokens, which leaves no room in the {MAX_CACHE_LEN}-token                  decode cache: split the text (drop --raw_text / lower --max_length) or \
+                 shorten it. The reference silently returns no audio for this input."
+            );
+        }
         let steps = p.max_decode_steps.min(budget);
         let mut latents: Vec<f32> = Vec::new();
         let mut z_steps = Vec::new();
@@ -238,6 +252,17 @@ impl Pipeline {
         }
 
         let n_latents = latents.len() / LATENT_DIM;
+        // MING_DUMP_LATENTS=<path>: raw little-endian f32, [n_latents, 64].
+        // Same idea as MING_DUMP_IDS -- it is how a step-by-step comparison
+        // against the reference's sampled_token_latent is done.
+        if let Ok(path) = std::env::var("MING_DUMP_LATENTS") {
+            let mut bytes = Vec::with_capacity(latents.len() * 4);
+            for v in &latents {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            std::fs::write(&path, &bytes)?;
+            println!("latents -> {path} ({n_latents} x {LATENT_DIM})");
+        }
         if std::env::var("MING_PROFILE").is_ok() {
             println!(
                 "    profile: prefill {:?} | dit {:?} | llm+agg {:?}",

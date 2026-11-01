@@ -122,6 +122,51 @@ impl RopeTables {
     }
 }
 
+/// K/V scratch plus the matching rope table for a stack pass over `cap`
+/// positions.
+///
+/// The LLM can live with the checkpoint's 512-position decode window, but the
+/// VAE encoder/decoder see the whole waveform in one call, so their length is
+/// unbounded: [`KvCache::ensure`] grows the buffers when a longer utterance
+/// arrives. Sizing those caches from the LLM's window silently overflowed both
+/// the K/V buffers and the rope table for anything longer than 6.4 s of audio.
+pub struct KvCache {
+    pub k: Buffer,
+    pub v: Buffer,
+    pub rope: RopeTables,
+    pub cap: usize,
+}
+
+impl KvCache {
+    pub fn new(gpu: &Gpu, n_kv: usize, head_dim: usize, theta: f64, cap: usize) -> Self {
+        let bytes = (n_kv * cap * head_dim * 4) as u64;
+        Self {
+            k: gpu.storage(bytes, "kv.k"),
+            v: gpu.storage(bytes, "kv.v"),
+            rope: RopeTables::new(gpu, theta, head_dim, cap),
+            cap,
+        }
+    }
+
+    /// Grow (never shrink) so `t` positions fit; rebuilds the rope table too.
+    /// `floor` keeps the first allocation at the historical size so short
+    /// utterances do not allocate anything extra.
+    pub fn ensure(
+        &mut self,
+        gpu: &Gpu,
+        n_kv: usize,
+        head_dim: usize,
+        theta: f64,
+        t: usize,
+        floor: usize,
+    ) {
+        if t <= self.cap {
+            return;
+        }
+        *self = KvCache::new(gpu, n_kv, head_dim, theta, t.next_power_of_two().max(floor));
+    }
+}
+
 /// Attention kernel arguments (mirrors the ATTEND Params struct).
 #[derive(Clone, Copy)]
 pub struct AttendParams {

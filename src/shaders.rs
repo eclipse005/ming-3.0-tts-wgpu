@@ -295,6 +295,11 @@ struct Params {
 @group(0) @binding(2) var<storage, read> kc: array<f32>;  // [n_kv*512*64]
 @group(0) @binding(3) var<storage, read> vc: array<f32>;
 @group(0) @binding(4) var<storage, read_write> y: array<f32>; // [T, 896]
+// Scratch is indexed by (pos - lo), NOT by absolute position: with a sliding
+// window only `window` positions are ever live, while absolute positions run
+// to the length of the utterance. Indexing by pos made the VAE decoder (window
+// 64, but 640+ frames of audio) write past these arrays -- silently, since
+// wgpu does not bounds-check workgroup storage.
 var<workgroup> sc: array<f32, 512>;
 var<workgroup> wgt: array<f32, 512>;
 var<workgroup> red: array<f32, 64>;
@@ -328,7 +333,7 @@ fn main(
                 dd = dd + 1u;
             }
             s = s * p.scale;
-            sc[pos] = s;
+            sc[pos - lo] = s;
             pmax = max(pmax, s);
         }
         pos = pos + 64u;
@@ -350,8 +355,8 @@ fn main(
     loop {
         if (pos > qpos) { break; }
         if (pos >= lo) {
-            let wv = exp(sc[pos] - m);
-            wgt[pos] = wv;
+            let wv = exp(sc[pos - lo] - m);
+            wgt[pos - lo] = wv;
             psum = psum + wv;
         }
         pos = pos + 64u;
@@ -372,7 +377,7 @@ fn main(
     pos = lo;
     loop {
         if (pos > qpos) { break; }
-        acc = acc + wgt[pos] * vc[kbase + pos * 64u + d];
+        acc = acc + wgt[pos - lo] * vc[kbase + pos * 64u + d];
         pos = pos + 1u;
     }
     y[qbase + d] = acc / denom;

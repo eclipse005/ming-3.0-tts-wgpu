@@ -11,11 +11,12 @@
 
 use crate::gpu::Gpu;
 use crate::istft::Istft;
-use crate::ops::{AttendParams, Lin, Ops, QwenLayer, RopeTables};
+use crate::ops::{AttendParams, KvCache, Lin, Ops, QwenLayer};
 use crate::qwen_lm::{HEAD_DIM, HIDDEN, KV_CAP, KV_HEADS, Q_HEADS, ROPE_THETA};
 use crate::weights::Weights;
 use anyhow::Result;
 use rustfft::num_complex::Complex32;
+use std::cell::RefCell;
 use std::sync::Arc;
 use wgpu::Buffer;
 
@@ -32,9 +33,7 @@ pub struct VaeDecoder {
     dec_norm: Buffer,
     head: Lin,
     istft: Istft,
-    rope: RopeTables,
-    kv_k: Buffer,
-    kv_v: Buffer,
+    kv: RefCell<KvCache>,
     ops: Arc<Ops>,
 }
 
@@ -60,7 +59,7 @@ impl VaeDecoder {
         let dec = (0..DEC_LAYERS)
             .map(|i| qlayer(&format!("audio.decoder.decoder.layers.{i}")))
             .collect::<Result<Vec<_>>>()?;
-        let rope = RopeTables::new(&gpu, ROPE_THETA, HEAD_DIM, KV_CAP);
+        let kv = RefCell::new(KvCache::new(&gpu, KV_HEADS, HEAD_DIM, ROPE_THETA, KV_CAP));
         let n_fft = 4 * 882;
         let win = p("audio.decoder.head.istft.window")?.to_f32()?;
         Ok(Self {
@@ -69,9 +68,7 @@ impl VaeDecoder {
             dec_norm: gpu.upload_f32(&p("audio.decoder.decoder.norm.weight")?.to_f32()?, "dec.norm"),
             head: lin("audio.decoder.head.out", n_fft + 2, HIDDEN)?,
             istft: Istft::new(n_fft, 882, win),
-            rope,
-            kv_k: gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "dec.kv_k"),
-            kv_v: gpu.storage((KV_HEADS * KV_CAP * HEAD_DIM * 4) as u64, "dec.kv_v"),
+            kv,
             ops,
             gpu,
         })
@@ -105,19 +102,22 @@ impl VaeDecoder {
     /// Causal Qwen2 stack with sliding window 64 over t tokens at positions 0..t.
     fn stack(&self, layers: &[QwenLayer], x: Buffer, t: usize) -> Result<Buffer> {
         let mut h = x;
+        let mut kv = self.kv.borrow_mut();
+        kv.ensure(&self.gpu, KV_HEADS, HEAD_DIM, ROPE_THETA, t, KV_CAP);
+        let cap = kv.cap;
         for layer in layers {
             let a = self.rms(&h, &layer.n1, t);
             let q = self.mrow(&layer.q, &a, t)?;
             let k = self.mrow(&layer.k, &a, t)?;
             let v = self.mrow(&layer.v, &a, t)?;
-            self.ops.rope(&self.rope, &q, Q_HEADS, 0, 0, t);
-            self.ops.rope(&self.rope, &k, KV_HEADS, 0, 0, t);
-            let kc = &self.kv_k;
-            let vc = &self.kv_v;
-            self.ops.kv_write(&k, kc, t, 0, KV_CAP, KV_HEADS);
-            self.ops.kv_write(&v, vc, t, 0, KV_CAP, KV_HEADS);
+            self.ops.rope(&kv.rope, &q, Q_HEADS, 0, 0, t);
+            self.ops.rope(&kv.rope, &k, KV_HEADS, 0, 0, t);
+            let kc = &kv.k;
+            let vc = &kv.v;
+            self.ops.kv_write(&k, kc, t, 0, cap, KV_HEADS);
+            self.ops.kv_write(&v, vc, t, 0, cap, KV_HEADS);
             let attn = self.ops.attend(
-                &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, KV_CAP)
+                &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, cap)
                 .with_window(WINDOW as usize),
                 &q,
                 kc,

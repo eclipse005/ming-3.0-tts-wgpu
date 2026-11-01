@@ -130,3 +130,118 @@ mod m2_block0_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod long_prompt_tests {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::qwen_lm::LlmEngine;
+    use crate::weights::{bf16_widen, Weights};
+
+    fn g(n: &str) -> crate::golden::Npy {
+        let dir = std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
+        read_npy(&std::path::Path::new(&dir).join("m5_long").join(n)).unwrap()
+    }
+
+    /// The 36 params_test cases prefill 34-65 tokens. Long text prefills far
+    /// more, so the first decode step has to be checked at a length the
+    /// acceptance set never reaches: if the prefill drifts at 161 tokens, every
+    /// latent of that utterance is conditioned on the wrong hidden state and no
+    /// amount of downstream parity would show it.
+    ///
+    /// Goldens are the reference's `z_diff` captured on the first
+    /// `FlowLoss.sample` call (tools/dump_z0.py), plus the exact ids.
+    #[test]
+    fn long_prompt_prefill_matches_python() {
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let table = weights.get("model.model.embed_tokens.weight").unwrap();
+        let (vocab, dim) = (table.shape[0], table.shape[1]);
+        for name in ["S3_zh60_one", "S6_zh200_cap", "S8_en260"] {
+            let ids = g(&format!("{name}_ids.npy"));
+            let want = g(&format!("{name}_z0.npy"));
+            let mut eng = LlmEngine::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
+            let t = ids.data.len();
+            let mut embeds = vec![0f32; t * dim];
+            for (i, &id) in ids.data.iter().enumerate() {
+                let id = id as usize;
+                assert!(id < vocab, "{name}: token id {id} >= vocab {vocab}");
+                let off = id * dim * 2;
+                for j in 0..dim {
+                    let lo = table.data[off + 2 * j] as u32;
+                    let hi = table.data[off + 2 * j + 1] as u32;
+                    embeds[i * dim + j] = bf16_widen(lo | (hi << 8));
+                }
+            }
+            let (z, prob) = eng.prefill_full(&embeds, t).unwrap();
+            let e = rel_l2(&z, &want.data);
+            println!("{name}: t={t} z rel_l2={e:.3e} stop_prob={:.4}", prob[1]);
+            assert!(e < 1e-5, "{name}: prefill z rel_l2 {e:.3e} >= 1e-5");
+        }
+    }
+}
+
+#[cfg(test)]
+mod long_audio_tests {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::vae::VaeEncoder;
+    use crate::vae_dec::VaeDecoder;
+    use crate::weights::Weights;
+
+    fn g(n: &str) -> crate::golden::Npy {
+        let dir = std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
+        read_npy(&std::path::Path::new(&dir).join("m5_long").join(n)).unwrap()
+    }
+
+    /// 160 latents = 640 decoder frames = 12.8 s of audio, i.e. past the 512
+    /// positions the LLM decodes in.
+    ///
+    /// The VAE decoder used to borrow `KV_CAP` (the LLM's window) for its K/V
+    /// buffers and rope table while writing the WHOLE utterance in one pass.
+    /// Every waveform longer than 6.4 s therefore wrote past the cache and came
+    /// out corrupted -- and no params_test case was long enough to notice.
+    #[test]
+    fn vae_decodes_past_the_llm_window() {
+        let lat = g("long_dec_lat.npy");
+        let want = g("long_dec_wav.npy");
+        let t_lat = lat.shape[0];
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let dec = VaeDecoder::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
+        let got = dec.decode(&lat.data, t_lat).unwrap();
+        assert_eq!(got.len(), want.data.len(), "waveform length");
+        let e = rel_l2(&got, &want.data);
+        println!("decode {t_lat} latents ({:.1} s) rel_l2={e:.3e}", t_lat as f32 * 0.08);
+        assert!(e < 1e-4, "long decode rel_l2 {e:.3e} >= 1e-4");
+    }
+
+    /// 12 s of prompt = 600 encoder frames (750 after the cls patches), past the
+    /// same 512-position cache. Prompt latents for cloning are re-drawn with the
+    /// reference's own RNG so the sampled latent can be compared directly.
+    #[test]
+    fn vae_encodes_past_the_llm_window() {
+        let wav = g("long_enc_wav.npy");
+        let want = g("long_enc_lat.npy");
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let enc = VaeEncoder::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
+        let (mean, std, _n) = enc.encode_params(&wav.data).unwrap();
+        let frames = mean.len() / 64;
+        assert_eq!(frames * 64, want.data.len(), "latent frame count");
+        let mut rng = crate::rng::Philox::new(1895);
+        let raw = rng.draw(64 * frames);
+        let mut lat = vec![0f32; mean.len()];
+        for t in 0..frames {
+            for c in 0..64 {
+                let i = t * 64 + c;
+                lat[i] = mean[i] + std[i] * raw[c * frames + t];
+            }
+        }
+        let e = rel_l2(&lat, &want.data);
+        println!("encode {} samples -> {frames} latents, rel_l2={e:.3e}", wav.data.len());
+        assert!(e < 1e-4, "long encode rel_l2 {e:.3e} >= 1e-4");
+    }
+}

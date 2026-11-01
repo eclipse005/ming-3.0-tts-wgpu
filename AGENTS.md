@@ -9,7 +9,7 @@
 ```bat
 cd D:\Ming-3.0-tts\wgpu
 cargo build --release
-cargo test --release -- --test-threads=1        :: 56 个测试，约 170 s，需要 GPU
+cargo test --release -- --test-threads=1        :: 59 个测试，约 190 s，需要 GPU
 ```
 
 单条合成（参数面与 Python 的 `infer.py` 逐字一致）：
@@ -47,6 +47,9 @@ target\release\ming-tts-wgpu.exe synth ^
 - 数值：`cargo test --release` 全绿。每个阶段的门限见 PROGRESS.md 第 4.1 节。
 - 音频：`tools/check_params_align.py` 会逐例打印 时长比 / rel_l2 / log-mel 相关 /
   音色余弦；判定标准见 PROGRESS.md 第 4.2 节。
+- **改动碰到"长度/缓存/分片"时**跑 `python tools/stress_compare.py`（10 例压力集：
+  长文、多分片、极短文本、混排、raw_text）。`cargo test --release` 里另有三个门限专门
+  守这条线：长 prefill（161 token）、长解码（640 帧 / 12.8 s）、长编码（600 帧 / 12 s）。
 - **不要追求逐采样点一致**：解码环是混沌的，1e-7 的输入扰动会被放大 1e5 倍
   （PROGRESS.md 4.4 已量化）。目标是每步 ~1e-6 数值一致 + 停止判据一致 + 听感一致。
 
