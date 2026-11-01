@@ -3,7 +3,8 @@
 > **一句话状态**：Ming-3.0-tts-0.5b 已完整移植为纯 Rust + wgpu（无 Python / torch /
 > CUDA 依赖），五个里程碑全部数值对齐；36 个参数用例 **36/36 时长逐采样点一致**，
 > 26 例波形级重合（rel_l2 ≤ 5e-2，最好 3.6e-5），其余 10 例只有后段的相位差
-> （log-mel ≥ 0.9959，见 4.4）。**唯一未达成的验收项是 RTF：2.51 vs Python 0.88。**
+> （log-mel ≥ 0.9959，见 4.4）。**唯一未达成的验收项是 RTF：现在 2.0（合批前 2.51），
+> Python 0.88 —— 交接见 0.5 节。**
 
 接手顺序：**本文** → [REVIEW.md](REVIEW.md)（代码结构评审与重构记录）→
 [WGPU_PORT_ANALYSIS.md](WGPU_PORT_ANALYSIS.md)（最初的拆解方案）。
@@ -15,7 +16,7 @@
 `wgpu/` 是一个**独立 git 仓库**（与 Python 主仓 `D:\Ming-3.0-tts` 分离），把
 `Ming-3.0-tts-0.5b` 的全部推理链路重写为 Rust + wgpu：Qwen2.5-0.5B LLM、DiT + CFM
 流匹配、VAE 编码/解码、iSTFT、文本前端、分词、CAMPlus 说话人。约 8 千行 Rust，
-21 个源文件，56 个测试。
+21 个源文件，63 个测试。
 
 ### 三条命令
 
@@ -49,8 +50,107 @@ cargo test --release -- --test-threads=1
 
 ### 下一步从哪开始
 
-只剩性能。按收益排序的四步在 [第 5 节](#5-未完成与已知问题)，其中 **pred/null 合批**
-和 **tiled GEMM** 是决定能不能进 0.88 的两条。
+只剩性能。**先读 0.5 节**（RTF 攻坚交接：已确认的数字、已排除的方案、还没试的四条）。
+其中 tiled GEMM 是决定能不能进 0.88 的关键。
+
+## 0.5 RTF 攻坚交接（2026-11-01 状态，给接手者）
+
+> **一句话**：数值和听感对齐已经完成并且有 63 个测试 + 36 例 sweep 守着；
+> **RTF 2.0 vs Python 0.88，差的完全是 kernel 执行效率**——不是算法、不是硬件、
+> 不是移植错误。同一台机器 Python 能跑 0.88，所以这条路是通的，只是没走完。
+
+### 0.5.1 时间账（A1_bare：3.2 s 音频，冷机）
+
+| 阶段 | 现在 | Python（RUNBOOK 反推） | 备注 |
+|---|---|---|---|
+| prefill（43 token） | 0.45–0.49 s | 含在 4.4 s 内 | 走通用 GEMV，每 token 重读权重 |
+| **DiT + CFM（10 次合批前向 × 40 步）** | **4.75–4.84 s** | **3.34 s** | 唯一的大头 |
+| LLM 解码 + aggregator | 1.14–1.28 s | 0.84 s | |
+| 解码环合计 | **6.4–6.5 s → RTF 2.0** | **4.4 s → RTF 0.88** | |
+
+**热机后同样代码慢 ~18%**（DiT 4.84 → 5.65，复测一致，见 4.12）。所以所有 A/B 必须
+背靠背，别拿隔半小时的绝对数字比。
+
+### 0.5.2 已确认的事实（不必重测）
+
+| 事实 | 数字 | 出处 |
+|---|---|---|
+| 每次 DiT 前向 | **12.1 ms**（Python 5.4 ms） | MING_PROFILE |
+| 每次前向的权重流量 | 200 MB bf16 → **16 GB/s**（单 GEMM 基准 24 GB/s；Python ~37 GB/s） | `linear_bandwidth` |
+| 40 步解码的 dispatch / buffer | **84,308 / 61,535**（每前向 211 次 dispatch） | MING_MEM=1 |
+| 单次 dispatch 成本（同卡实测） | ~5.7 µs → 84k 次 = **0.48 s**，不是主因 | qwen3-asr `docs/perf.md` |
+| 同卡 M=1 GEMV 可达到 | **226–268 GB/s** | 同上 |
+| 同卡 tiled GEMM 相对基线 | **48.2×**（128×64×32 单缓冲） | ctc `src/gemm_kernel.rs` |
+| 我们 M=1 现在 | **62–65 GB/s** | `linear_bandwidth` |
+
+### 0.5.3 已试并排除（别重复）
+
+| 尝试 | 结果 | 原因 |
+|---|---|---|
+| pred/null 合批成 6 行 | 6.45 → **4.75 s** ✅ | 权重读一遍顶两遍（已提交） |
+| vec4 权重 + **单 token** | 20 → **62–65 GB/s** ✅ | 16 B 一次加载（已提交） |
+| vec4 权重 + **6 token** | 24 GB/s（持平） | 每 granule 12 个激活读淹掉收益 |
+| 每 lane 4 行的寄存器分块 | 4.51 s（+5%） | FMA 总数没变 |
+| K 循环 4 路展开 | 无变化 | 不是加载延迟受限 |
+| 激活整块进 workgroup 内存 | 9.0 s（更差） | 屏障把加载延迟串行化 |
+| 2 行/warp（归约缓冲 12 KB） | 20 GB/s（更差） | occupancy 砍半 |
+
+后两条与 ctc 的 tile 扫描结论一致：**Pascal 上 occupancy 优先于预取**。
+
+### 0.5.4 还没试的（按预期收益排序，这就是接手要做的事）
+
+1. **把 GEMV 换成真正的 2D tiled GEMM**（最大的一条）。
+   - 现成的模板：`D:\ctc-forced-aligner-wgpu\src\gemm_kernel.rs`——同卡、同后端、
+     比它的基线快 **48×**，也是 16×16 线程 + 共享 A tile + `vec4` B + 寄存器累加器。
+   - 它的三条经验：①累加器必须用**命名 `vec4` 局部变量**（`array<f32,N>` 会溢出到
+     local memory）；②共享 A 要 padding（`sa_stride % 8 == 1`）防 bank 冲突；
+     ③双缓冲在这张卡上**输**给单缓冲（occupancy 优先）。
+   - 我们的映射：把 **token 当 N 维**（6 → pad 到 8）、**行当 M 维**（1024/4096），
+     K 按 32 切。每线程算 8 行 × 1 token 或类似，把激活读进共享复用。
+   - 目标：35–50 GB/s → DiT 2.2–3.1 s。
+
+2. **检查 `Features::SUBGROUP` 是否可用**（wgpu 30 的 `Adapter::features()`）。
+   可用就把蝶形归约换成 `subgroupShuffleXor`，6 KB 共享内存归零，occupancy 和
+   寄存器都松一口气。qwen3 的 kernel 两条路都写了（`subgroup` 开关）。
+
+3. **RMSNorm 融进线性层**（qwen3 的 `gemv_norm`）：读一次 x、归一化、投影一次做完，
+   每层省一次 dispatch 和一次全量读。
+
+4. **qkv 三合一**：加载时把三个 `[1024,1024]` 权重拼成一个 `[3072,1024]`，一次
+   dispatch 出 q/k/v（每 block 少 2 次 dispatch）。
+
+5. **prefill（0.45 s）**：现在 t=43 走通用 GEMV，每 token 重读权重；用 vec4 + 多 token
+   复用可砍一半。
+
+6. **aggregator（t=2）**：同 t=1 的 vec4 化（本次已写了 t=2 版但因热漂移未能可靠 A/B，
+   代码已回滚，可重做）。
+
+7. **bind group / buffer 复用**：每次 dispatch 新建 bind group、每层新建 buffer
+   （61k buffer/40 步）。dispatch 上限 0.48 s，这里还能再压 0.2–0.3 s。
+
+### 0.5.5 工具、门限、纪律
+
+```bat
+cd D:\Ming-3.0-tts\wgpu
+:: 带宽基准：改完 kernel 先看这个（t=1 应 >=60 GB/s，t=6 目标 35+）
+cargo test --release linear_bandwidth -- --nocapture
+:: 数值门限（63 个测试，约 180 s）
+cargo test --release -- --test-threads=1
+:: 36 例 + 10 例压力集（需要 videolingo 环境 + PYTHONPATH=.runtime\pylibs446）
+%PY% wgpu\tools\check_params_align.py
+%PY% wgpu\tools\stress_compare.py --skip-ref
+```
+
+- **任何性能改动都不许动数值**：63 个测试 + 36 例 sweep 是护栏，红了就是改错了。
+- 性能改动必须**背靠背 A/B**（同一分钟内跑两个版本），否则会被热降频骗（4.12）。
+- 不要为了让 benchmark 好看去改金标或放宽门限。
+
+### 0.5.6 关于"能不能到 0.88"
+
+上一轮我在 PROGRESS 里写过"DiT 屋顶 34–40 GB/s、0.88 到不了"——**那个结论是错的，
+已作废**。同样的 48 个 FMA，cuBLAS 在同一块卡上跑 37 GB/s，我们只跑到 16–24 GB/s；
+M=1 我们已经做到 62 GB/s。差的是执行效率（寄存器分块、ILP、访存流水），不是算术量，
+也不是硬件。**Python 能跑到 0.88，这条路是通的。**
 
 ## 1. 现状
 
@@ -359,12 +459,19 @@ GELU 用 erf 而不是 tanh 那件事仍然成立（每元素差 1e-3，是真�
 - STYLE 任务分片时会拿第 0 片重新做参考（`reference_first_fragment`），后面每片的 `t` 会额外带上第 0 片的 latent 行数（几十个），预算相应再少一点。
 
 ### 4.11 GEMM 屋顶线：DiT 为什么卡在 24 GB/s（2026-11-01 量）
+
+> **⚠️ 本节结论已作废，只保留测量数据。** 当时把"我们 kernel 的发出率屋顶"当成了
+> "这张卡的屋顶"。事实：同样 48 个 FMA，cuBLAS 在同一块卡上跑到 ~37 GB/s，我们只到
+> 16–24 GB/s；而且同卡 M=1 GEMV 能跑 226–268 GB/s。差别是执行效率（寄存器分块、
+> ILP、访存流水），不是算术量。**0.88 是可达的**，见 0.5 节。
 同类移植项目的实测（`D:\qwen3-asr-wgpu\docs\perf.md`，同一张 P104-100）：`t_us = 5.7 + MB×1000/268`，即 **M=1 GEMV 能到 226-268 GB/s**。但那是单 token 的形状。DiT 的 CFG 合批是 **M=6**，每个权重 granule（8 个 bf16）要配 12 个激活 `vec4` + 48 个 FMA：
 | 形态 | 每 granule 指令 | 实测带宽 |
 |---|---|---|
 | M=1（LLM 解码） | 1 权重 + 2 激活 + 8 FMA ≈ 11 | **62-65 GB/s** |
 | M=6（DiT 合批） | 1 权重 + 12 激活 + 48 FMA ≈ 69 | **24 GB/s** |
-48 个 FMA 是**不可压缩**的（6 token × 8 值，激活必须 f32）。按 20 SM × 4 scheduler × 1.6 GHz 估，524k 个 granule 的理论下限约 250 µs，实测 348 µs —— 已经在发出率屋顶的 1.4x 以内。所以 226-268 GB/s 那个数字**不能直接套到 DiT 上**；DiT 的屋顶大约在 34-40 GB/s。
+48 个 FMA 是**不可压缩**的（6 token × 8 值，激活必须 f32）。按 20 SM × 4 scheduler × 1.6 GHz 估，524k 个 granule 的*指令发出*下限约 250 µs，实测 348 µs —— 说明"每 warp 一行"这个形态已经接近自己的发出率上限。
+
+**但这只是这种写法的上限，不是这张卡的上限**：cuBLAS 在同样的卡、同样 6 token 上做到 ~37 GB/s（即每个 granule 用更少的指令，靠寄存器分块摊薄激活读和循环开销）。要突破必须换形态（0.5.4 第 1 条）。
 已试过并排除的：寄存器分块 4 行/lane（4.51 s，指令没变少）、K 循环 4 路展开（无变化）、激活整块进共享内存（9.0 s，屏障串行化）、2 行/warp（20 GB/s，归约缓冲 12 KB 把 occupancy 砍半）。最后一条和 ctc 移植项目的 tile 扫描结论一致：**Pascal 上 occupancy 优先于预取**。
 ### 4.12 计时会在热机后漂移 ~18%（做 A/B 时注意）
 同一份二进制、同一句话，一小时前 DiT 是 4.84 s，连跑数小时压测后变成 5.65 s（两轮复测一致）。P104-100 是被动散热，长时间满载会降频。
