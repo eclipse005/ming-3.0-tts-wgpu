@@ -247,6 +247,7 @@ pub struct Ops {
     k_linear: crate::nn::Kernel,
     k_linear_t4: crate::nn::Kernel,
     k_linear_t8: crate::nn::Kernel,
+    k_linear_t8u4: crate::nn::Kernel,
     k_rope: crate::nn::Kernel,
     k_attend: crate::nn::Kernel,
     k_kv_write: crate::nn::Kernel,
@@ -265,6 +266,7 @@ impl Ops {
             k_linear: kernel(&gpu, shaders::GEMV_MROW, 3),
             k_linear_t4: kernel(&gpu, shaders::GEMV_MROW_T4, 3),
             k_linear_t8: kernel(&gpu, shaders::GEMV_MROW_T8, 3),
+            k_linear_t8u4: kernel(&gpu, shaders::GEMV_MROW_T8U4, 3),
             k_rope: kernel(&gpu, shaders::ROPE, 2),
             k_attend: kernel(&gpu, shaders::ATTEND, 3),
             k_kv_write: kernel(&gpu, shaders::KV_WRITE, 1),
@@ -301,6 +303,17 @@ impl Ops {
     }
 
     pub fn linear_into(&self, lin: &Lin, x: &Buffer, y: &Buffer, t: usize) {
+        if t == 6 && lin.in_features % 256 == 0 {
+            self.k_linear_t8u4.run(
+                &self.gpu,
+                &uni4(lin.rows as u32, (lin.in_features / 2) as u32, 6, 0),
+                &[&lin.w, x, &lin.b],
+                y,
+                ((lin.rows + 7) / 8) as u32,
+                1,
+            );
+            return;
+        }
         let kt = if t <= 4 {
             Some(&self.k_linear_t4)
         } else if t <= 8 {

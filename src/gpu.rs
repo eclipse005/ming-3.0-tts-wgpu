@@ -35,6 +35,8 @@ pub struct Gpu {
     /// recordings -- and therefore their buffers -- go). `MING_MEM=1` prints
     /// both: the first is "what the pipeline asked for", the second is a good
     /// proxy for the peak live set of one stage.
+    alloc_count: std::sync::Arc<std::cell::Cell<u64>>,
+    dispatch_count: std::sync::Arc<std::cell::Cell<u64>>,
     alloc_bytes: std::sync::Arc<std::cell::Cell<u64>>,
     alloc_since_flush: std::sync::Arc<std::cell::Cell<u64>>,
     peak_window: std::sync::Arc<std::cell::Cell<u64>>,
@@ -153,6 +155,8 @@ impl Gpu {
             arena,
             arena_host: std::sync::Arc::new(RefCell::new(Vec::new())),
             arena_used: std::sync::Arc::new(std::cell::Cell::new(0)),
+            alloc_count: std::sync::Arc::new(std::cell::Cell::new(0)),
+            dispatch_count: std::sync::Arc::new(std::cell::Cell::new(0)),
             alloc_bytes: std::sync::Arc::new(std::cell::Cell::new(0)),
             alloc_since_flush: std::sync::Arc::new(std::cell::Cell::new(0)),
             peak_window: std::sync::Arc::new(std::cell::Cell::new(0)),
@@ -160,6 +164,7 @@ impl Gpu {
     }
 
     pub fn buffer(&self, size: u64, usage: BufferUsages, label: &str) -> Buffer {
+        self.alloc_count.set(self.alloc_count.get() + 1);
         self.alloc_bytes.set(self.alloc_bytes.get() + size);
         self.alloc_since_flush
             .set(self.alloc_since_flush.get() + size);
@@ -174,6 +179,11 @@ impl Gpu {
     /// (cumulative bytes, peak bytes allocated in one flush window).
     pub fn mem_stats(&self) -> (u64, u64) {
         (self.alloc_bytes.get(), self.peak_window.get())
+    }
+
+    /// (buffers created, dispatches recorded) since process start.
+    pub fn counters(&self) -> (u64, u64) {
+        (self.alloc_count.get(), self.dispatch_count.get())
     }
 
     pub fn storage(&self, size: u64, label: &str) -> Buffer {
@@ -313,6 +323,7 @@ impl Gpu {
         wgs_x: u32,
         wgs_y: u32,
     ) {
+        self.dispatch_count.set(self.dispatch_count.get() + 1);
         {
             let mut dq = self.dispatches.borrow_mut();
             dq.push(PendingDispatch {

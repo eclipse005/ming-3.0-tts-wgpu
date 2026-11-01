@@ -308,9 +308,12 @@ pub fn run(a: Args) -> Result<()> {
         );
         let (cum_loop, peak_loop) = pl.gpu.mem_stats();
         if mem {
+            let (nb, nd) = pl.gpu.counters();
             println!(
-                "  mem decode    : {:.1} MiB allocated for {} latents, peak window {:.1} MiB",
+                "  mem decode    : {:.1} MiB in {} buffers, {} dispatches for {} latents, peak window {:.1} MiB",
                 (cum_loop - before) as f64 / 1048576.0,
+                nb,
+                nd,
                 trace.n_latents,
                 peak_loop as f64 / 1048576.0
             );

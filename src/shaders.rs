@@ -238,6 +238,153 @@ fn main(
 }
 "#;
 
+/// 8-token linear, K loop unrolled 4x.
+///
+/// The 8-token kernel keeps only ONE weight load in flight per lane; at 8 rows
+/// per workgroup that is ~1 KB per workgroup, well under what the memory
+/// pipeline needs to cover DRAM latency. Unrolling gives four independent
+/// 128-byte row loads per iteration. Requires in_words % 128 == 0 for the fast
+/// path; anything else falls through to the same scalar tail the other kernels
+/// use.
+pub const GEMV_MROW_T8U4: &str = r#"
+struct Params { rows: u32, in_words: u32, n_tok: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<u32>;
+@group(0) @binding(2) var<storage, read> x: array<f32>;
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;
+var<workgroup> red: array<array<array<f32, 32>, 8>, 8>;
+
+fn bf_lo(u: u32) -> f32 { return bitcast<f32>((u & 0xFFFFu) << 16u); }
+fn bf_hi(u: u32) -> f32 { return bitcast<f32>(u & 0xFFFF0000u); }
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let warp = li / 32u;
+    let lane = lid.x % 32u;
+    let row = wg.x * 8u + warp;
+    let in_len = p.in_words * 2u;
+    var a0 = 0.0;
+    var a1 = 0.0;
+    var a2 = 0.0;
+    var a3 = 0.0;
+    var a4 = 0.0;
+    var a5 = 0.0;
+    var a6 = 0.0;
+    var a7 = 0.0;
+    let wbase = row * p.in_words;
+    var wi = lane;
+    loop {
+        if (wi + 96u < p.in_words) {
+                let u0 = w[wbase + wi + 0u];
+                let u1 = w[wbase + wi + 32u];
+                let u2 = w[wbase + wi + 64u];
+                let u3 = w[wbase + wi + 96u];
+                let lo0 = bf_lo(u0);
+                let hi0 = bf_hi(u0);
+                let lo1 = bf_lo(u1);
+                let hi1 = bf_hi(u1);
+                let lo2 = bf_lo(u2);
+                let hi2 = bf_hi(u2);
+                let lo3 = bf_lo(u3);
+                let hi3 = bf_hi(u3);
+                let x0 = (wi + 0u) * 2u;
+                let x1 = (wi + 32u) * 2u;
+                let x2 = (wi + 64u) * 2u;
+                let x3 = (wi + 96u) * 2u;
+                if (p.n_tok > 0u) { a0 = a0 + lo0 * x[x0] + hi0 * x[x0 + 1u]; }
+                if (p.n_tok > 0u) { a0 = a0 + lo1 * x[x1] + hi1 * x[x1 + 1u]; }
+                if (p.n_tok > 0u) { a0 = a0 + lo2 * x[x2] + hi2 * x[x2 + 1u]; }
+                if (p.n_tok > 0u) { a0 = a0 + lo3 * x[x3] + hi3 * x[x3 + 1u]; }
+                if (p.n_tok > 1u) { a1 = a1 + lo0 * x[1u * in_len + x0] + hi0 * x[1u * in_len + x0 + 1u]; }
+                if (p.n_tok > 1u) { a1 = a1 + lo1 * x[1u * in_len + x1] + hi1 * x[1u * in_len + x1 + 1u]; }
+                if (p.n_tok > 1u) { a1 = a1 + lo2 * x[1u * in_len + x2] + hi2 * x[1u * in_len + x2 + 1u]; }
+                if (p.n_tok > 1u) { a1 = a1 + lo3 * x[1u * in_len + x3] + hi3 * x[1u * in_len + x3 + 1u]; }
+                if (p.n_tok > 2u) { a2 = a2 + lo0 * x[2u * in_len + x0] + hi0 * x[2u * in_len + x0 + 1u]; }
+                if (p.n_tok > 2u) { a2 = a2 + lo1 * x[2u * in_len + x1] + hi1 * x[2u * in_len + x1 + 1u]; }
+                if (p.n_tok > 2u) { a2 = a2 + lo2 * x[2u * in_len + x2] + hi2 * x[2u * in_len + x2 + 1u]; }
+                if (p.n_tok > 2u) { a2 = a2 + lo3 * x[2u * in_len + x3] + hi3 * x[2u * in_len + x3 + 1u]; }
+                if (p.n_tok > 3u) { a3 = a3 + lo0 * x[3u * in_len + x0] + hi0 * x[3u * in_len + x0 + 1u]; }
+                if (p.n_tok > 3u) { a3 = a3 + lo1 * x[3u * in_len + x1] + hi1 * x[3u * in_len + x1 + 1u]; }
+                if (p.n_tok > 3u) { a3 = a3 + lo2 * x[3u * in_len + x2] + hi2 * x[3u * in_len + x2 + 1u]; }
+                if (p.n_tok > 3u) { a3 = a3 + lo3 * x[3u * in_len + x3] + hi3 * x[3u * in_len + x3 + 1u]; }
+                if (p.n_tok > 4u) { a4 = a4 + lo0 * x[4u * in_len + x0] + hi0 * x[4u * in_len + x0 + 1u]; }
+                if (p.n_tok > 4u) { a4 = a4 + lo1 * x[4u * in_len + x1] + hi1 * x[4u * in_len + x1 + 1u]; }
+                if (p.n_tok > 4u) { a4 = a4 + lo2 * x[4u * in_len + x2] + hi2 * x[4u * in_len + x2 + 1u]; }
+                if (p.n_tok > 4u) { a4 = a4 + lo3 * x[4u * in_len + x3] + hi3 * x[4u * in_len + x3 + 1u]; }
+                if (p.n_tok > 5u) { a5 = a5 + lo0 * x[5u * in_len + x0] + hi0 * x[5u * in_len + x0 + 1u]; }
+                if (p.n_tok > 5u) { a5 = a5 + lo1 * x[5u * in_len + x1] + hi1 * x[5u * in_len + x1 + 1u]; }
+                if (p.n_tok > 5u) { a5 = a5 + lo2 * x[5u * in_len + x2] + hi2 * x[5u * in_len + x2 + 1u]; }
+                if (p.n_tok > 5u) { a5 = a5 + lo3 * x[5u * in_len + x3] + hi3 * x[5u * in_len + x3 + 1u]; }
+                if (p.n_tok > 6u) { a6 = a6 + lo0 * x[6u * in_len + x0] + hi0 * x[6u * in_len + x0 + 1u]; }
+                if (p.n_tok > 6u) { a6 = a6 + lo1 * x[6u * in_len + x1] + hi1 * x[6u * in_len + x1 + 1u]; }
+                if (p.n_tok > 6u) { a6 = a6 + lo2 * x[6u * in_len + x2] + hi2 * x[6u * in_len + x2 + 1u]; }
+                if (p.n_tok > 6u) { a6 = a6 + lo3 * x[6u * in_len + x3] + hi3 * x[6u * in_len + x3 + 1u]; }
+                if (p.n_tok > 7u) { a7 = a7 + lo0 * x[7u * in_len + x0] + hi0 * x[7u * in_len + x0 + 1u]; }
+                if (p.n_tok > 7u) { a7 = a7 + lo1 * x[7u * in_len + x1] + hi1 * x[7u * in_len + x1 + 1u]; }
+                if (p.n_tok > 7u) { a7 = a7 + lo2 * x[7u * in_len + x2] + hi2 * x[7u * in_len + x2 + 1u]; }
+                if (p.n_tok > 7u) { a7 = a7 + lo3 * x[7u * in_len + x3] + hi3 * x[7u * in_len + x3 + 1u]; }
+                wi = wi + 128u;
+        } else {
+            if (wi >= p.in_words) { break; }
+            let uT = w[wbase + wi];
+            let loT = bf_lo(uT);
+            let hiT = bf_hi(uT);
+            let xT = wi * 2u;
+                if (p.n_tok > 0u) { a0 = a0 + loT * x[xT] + hiT * x[xT + 1u]; }
+                if (p.n_tok > 1u) { a1 = a1 + loT * x[1u * in_len + xT] + hiT * x[1u * in_len + xT + 1u]; }
+                if (p.n_tok > 2u) { a2 = a2 + loT * x[2u * in_len + xT] + hiT * x[2u * in_len + xT + 1u]; }
+                if (p.n_tok > 3u) { a3 = a3 + loT * x[3u * in_len + xT] + hiT * x[3u * in_len + xT + 1u]; }
+                if (p.n_tok > 4u) { a4 = a4 + loT * x[4u * in_len + xT] + hiT * x[4u * in_len + xT + 1u]; }
+                if (p.n_tok > 5u) { a5 = a5 + loT * x[5u * in_len + xT] + hiT * x[5u * in_len + xT + 1u]; }
+                if (p.n_tok > 6u) { a6 = a6 + loT * x[6u * in_len + xT] + hiT * x[6u * in_len + xT + 1u]; }
+                if (p.n_tok > 7u) { a7 = a7 + loT * x[7u * in_len + xT] + hiT * x[7u * in_len + xT + 1u]; }
+            wi = wi + 32u;
+        }
+    }
+    red[warp][0][lane] = a0;
+    red[warp][1][lane] = a1;
+    red[warp][2][lane] = a2;
+    red[warp][3][lane] = a3;
+    red[warp][4][lane] = a4;
+    red[warp][5][lane] = a5;
+    red[warp][6][lane] = a6;
+    red[warp][7][lane] = a7;
+    workgroupBarrier();
+    var s = 16u;
+    loop {
+        if (s == 0u) { break; }
+        if (lane < s) {
+            red[warp][0][lane] = red[warp][0][lane] + red[warp][0][lane + s];
+            red[warp][1][lane] = red[warp][1][lane] + red[warp][1][lane + s];
+            red[warp][2][lane] = red[warp][2][lane] + red[warp][2][lane + s];
+            red[warp][3][lane] = red[warp][3][lane] + red[warp][3][lane + s];
+            red[warp][4][lane] = red[warp][4][lane] + red[warp][4][lane + s];
+            red[warp][5][lane] = red[warp][5][lane] + red[warp][5][lane + s];
+            red[warp][6][lane] = red[warp][6][lane] + red[warp][6][lane + s];
+            red[warp][7][lane] = red[warp][7][lane] + red[warp][7][lane + s];
+        }
+        workgroupBarrier();
+        s = s / 2u;
+    }
+    if (lane == 0u && row < p.rows) {
+        let bias = b[row];
+        if (p.n_tok > 0u) { y[row] = red[warp][0][0] + bias; }
+        if (p.n_tok > 1u) { y[p.rows + row] = red[warp][1][0] + bias; }
+        if (p.n_tok > 2u) { y[2u * p.rows + row] = red[warp][2][0] + bias; }
+        if (p.n_tok > 3u) { y[3u * p.rows + row] = red[warp][3][0] + bias; }
+        if (p.n_tok > 4u) { y[4u * p.rows + row] = red[warp][4][0] + bias; }
+        if (p.n_tok > 5u) { y[5u * p.rows + row] = red[warp][5][0] + bias; }
+        if (p.n_tok > 6u) { y[6u * p.rows + row] = red[warp][6][0] + bias; }
+        if (p.n_tok > 7u) { y[7u * p.rows + row] = red[warp][7][0] + bias; }
+    }
+}
+"#;
+
 /// Multi-token linear with each weight row read ONCE for up to 8 tokens.
 /// y[t, r] = W[r,:] . X[t,:] + b[r]
 /// W bf16 packed [rows, in_words]; X f32 [T<=8, in]; Y f32 [T, rows].
