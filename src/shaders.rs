@@ -238,12 +238,113 @@ fn main(
 }
 "#;
 
+/// Multi-token linear with each weight row read ONCE for up to 8 tokens.
+/// y[t, r] = W[r,:] . X[t,:] + b[r]
+/// W bf16 packed [rows, in_words]; X f32 [T<=8, in]; Y f32 [T, rows].
+/// One warp per row, dispatch (rows/8, 1).
+///
+/// The plain GEMV_MROW dispatches one workgroup per (row, token), which
+/// re-reads every weight row once per token. The DiT now runs one 6-row pass
+/// per CFG step (cond + null batched), so without this kernel every forward
+/// would read the whole 192 MB of weights six times instead of once.
+pub const GEMV_MROW_T8: &str = r#"
+struct Params { rows: u32, in_words: u32, n_tok: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<u32>;
+@group(0) @binding(2) var<storage, read> x: array<f32>;   // [T, in]
+@group(0) @binding(3) var<storage, read> b: array<f32>;   // [rows]
+@group(0) @binding(4) var<storage, read_write> y: array<f32>; // [T, rows]
+var<workgroup> red: array<array<array<f32, 32>, 8>, 8>;
+
+fn bf_lo(u: u32) -> f32 { return bitcast<f32>((u & 0xFFFFu) << 16u); }
+fn bf_hi(u: u32) -> f32 { return bitcast<f32>(u & 0xFFFF0000u); }
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let warp = li / 32u;
+    let lane = lid.x % 32u;
+    let row = wg.x * 8u + warp;
+    let in_len = p.in_words * 2u;
+    var a0 = 0.0;
+    var a1 = 0.0;
+    var a2 = 0.0;
+    var a3 = 0.0;
+    var a4 = 0.0;
+    var a5 = 0.0;
+    var a6 = 0.0;
+    var a7 = 0.0;
+    if (row < p.rows) {
+        let wbase = row * p.in_words;
+        var wi = lane;
+        loop {
+            if (wi >= p.in_words) { break; }
+            let u = w[wbase + wi];
+            let lo = bf_lo(u);
+            let hi = bf_hi(u);
+            let x0 = wi * 2u;
+            if (p.n_tok > 0u) { a0 = a0 + lo * x[x0] + hi * x[x0 + 1u]; }
+            if (p.n_tok > 1u) { a1 = a1 + lo * x[in_len + x0] + hi * x[in_len + x0 + 1u]; }
+            if (p.n_tok > 2u) { a2 = a2 + lo * x[2u * in_len + x0] + hi * x[2u * in_len + x0 + 1u]; }
+            if (p.n_tok > 3u) { a3 = a3 + lo * x[3u * in_len + x0] + hi * x[3u * in_len + x0 + 1u]; }
+            if (p.n_tok > 4u) { a4 = a4 + lo * x[4u * in_len + x0] + hi * x[4u * in_len + x0 + 1u]; }
+            if (p.n_tok > 5u) { a5 = a5 + lo * x[5u * in_len + x0] + hi * x[5u * in_len + x0 + 1u]; }
+            if (p.n_tok > 6u) { a6 = a6 + lo * x[6u * in_len + x0] + hi * x[6u * in_len + x0 + 1u]; }
+            if (p.n_tok > 7u) { a7 = a7 + lo * x[7u * in_len + x0] + hi * x[7u * in_len + x0 + 1u]; }
+            wi = wi + 32u;
+        }
+    }
+    red[warp][0][lane] = a0;
+    red[warp][1][lane] = a1;
+    red[warp][2][lane] = a2;
+    red[warp][3][lane] = a3;
+    red[warp][4][lane] = a4;
+    red[warp][5][lane] = a5;
+    red[warp][6][lane] = a6;
+    red[warp][7][lane] = a7;
+    workgroupBarrier();
+    var s = 16u;
+    loop {
+        if (s == 0u) { break; }
+        if (lane < s) {
+            red[warp][0][lane] = red[warp][0][lane] + red[warp][0][lane + s];
+            red[warp][1][lane] = red[warp][1][lane] + red[warp][1][lane + s];
+            red[warp][2][lane] = red[warp][2][lane] + red[warp][2][lane + s];
+            red[warp][3][lane] = red[warp][3][lane] + red[warp][3][lane + s];
+            red[warp][4][lane] = red[warp][4][lane] + red[warp][4][lane + s];
+            red[warp][5][lane] = red[warp][5][lane] + red[warp][5][lane + s];
+            red[warp][6][lane] = red[warp][6][lane] + red[warp][6][lane + s];
+            red[warp][7][lane] = red[warp][7][lane] + red[warp][7][lane + s];
+        }
+        workgroupBarrier();
+        s = s / 2u;
+    }
+    if (lane == 0u && row < p.rows) {
+        let bias = b[row];
+        if (p.n_tok > 0u) { y[row] = red[warp][0][0] + bias; }
+        if (p.n_tok > 1u) { y[p.rows + row] = red[warp][1][0] + bias; }
+        if (p.n_tok > 2u) { y[2u * p.rows + row] = red[warp][2][0] + bias; }
+        if (p.n_tok > 3u) { y[3u * p.rows + row] = red[warp][3][0] + bias; }
+        if (p.n_tok > 4u) { y[4u * p.rows + row] = red[warp][4][0] + bias; }
+        if (p.n_tok > 5u) { y[5u * p.rows + row] = red[warp][5][0] + bias; }
+        if (p.n_tok > 6u) { y[6u * p.rows + row] = red[warp][6][0] + bias; }
+        if (p.n_tok > 7u) { y[7u * p.rows + row] = red[warp][7][0] + bias; }
+    }
+}
+"#;
+
 /// RoPE applied in place to q or k, one token per workgroup.
 /// interlected=0: Qwen2 rotate-half (pairs hd, hd+32); =1: x_transformers
 /// interleaved (pairs 2hd, 2hd+1). Angle tables [512, 32] f32 host-side.
 /// pos = pos_base + wg.x; dispatch (1, 1) for decode, (T, 1) for prefill.
 pub const ROPE: &str = r#"
-struct Params { n_heads: u32, pos_base: u32, interleaved: u32, }
+// row_base shifts only the ROW addressed in the activation (and the table for
+// the position stays pos_base + token): batched branches need positions
+// 0..n-1 each while living at different rows of one buffer.
+struct Params { n_heads: u32, pos_base: u32, interleaved: u32, row_base: u32, }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> cos_t: array<f32>;  // [512, 32]
 @group(0) @binding(2) var<storage, read> sin_t: array<f32>;
@@ -255,6 +356,7 @@ fn main(
 ) {
     let token = wg.x;
     let pos = p.pos_base + token;
+    let row = p.row_base + token;
     let c = cos_t[pos * 32u + (lid.x % 32u)];
     let s = sin_t[pos * 32u + (lid.x % 32u)];
     var idx = lid.x;
@@ -262,7 +364,7 @@ fn main(
         if (idx >= p.n_heads * 32u) { break; }
         let head = idx / 32u;
         let hd = idx % 32u;
-        let base = token * p.n_heads * 64u + head * 64u;
+        let base = row * p.n_heads * 64u + head * 64u;
         let d1 = select(base + hd, base + hd * 2u, p.interleaved > 0u);
         let d2 = select(d1 + 32u, d1 + 1u, p.interleaved > 0u);
         let x1 = q[d1];
@@ -289,6 +391,8 @@ struct Params {
     stride: u32,       // q/y row stride in f32 (hidden size)
     window: u32,       // sliding window (0 = full causal from position 0)
     cap: u32,          // per-head KV cache capacity in tokens
+    group: u32,        // 0 = one sequence; n = rows are n independent n-token
+                       //     sequences packed back to back (CFG batching)
 }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> q: array<f32>;   // [T, 896]
@@ -314,7 +418,13 @@ fn main(
     let kvh = head / p.heads_per_kv;
     var qpos = p.q_pos_base + t;
     if (p.full > 0u) { qpos = p.qpos_max; }
-    let lo = select(0u, max(qpos, p.window - 1u) - (p.window - 1u), p.window > 0u);
+    var lo = select(0u, max(qpos, p.window - 1u) - (p.window - 1u), p.window > 0u);
+    if (p.group > 0u) {
+        // row t belongs to group (t / group); it attends only its own slice
+        let g = t / p.group;
+        lo = g * p.group;
+        qpos = lo + p.group - 1u;
+    }
     let qbase = t * p.stride + head * 64u;
     let kbase = kvh * p.cap * 64u;
     let d = lid.x;
@@ -395,7 +505,8 @@ struct Params {
     dt: f32,
     cfg: f32,
     k: f32,
-    off: u32,
+    off: u32,       // where the cond prediction starts
+    off_null: u32,  // where the null prediction starts
 }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> pred: array<f32>;
@@ -410,7 +521,7 @@ fn main(
     let i = wg.x * 256u + lid.x;
     if (i < p.n) {
         let pc = pred[p.off + i];
-        let nc = nullp[p.off + i];
+        let nc = nullp[p.off_null + i];
         y[i] = y[i] + (pc + (pc - nc) * p.cfg) * p.dt + p.k * sde[i];
     }
 }
@@ -497,6 +608,35 @@ fn main(
         let row = i / p.w;
         let col = i % p.w;
         let v = select(select(c[col], b[col], row == 1u), a[col], row == 0u);
+        y[i] = v;
+    }
+}
+"#;
+
+/// Assemble a [6, W] seq from four [W] rows: [a, b, c, d, b, c]. That is the
+/// two-branch (cond, null) layout the CFG batching needs: each branch is
+/// [y, x_hist, x_now] and only y differs between them.
+pub const PACK6: &str = r#"
+struct Params { w: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0) @binding(2) var<storage, read> b: array<f32>;
+@group(0) @binding(3) var<storage, read> c: array<f32>;
+@group(0) @binding(4) var<storage, read> d: array<f32>;
+@group(0) @binding(5) var<storage, read_write> y: array<f32>; // [6*W]
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let i = wg.x * 256u + lid.x;
+    if (i < p.w * 6u) {
+        let row = i / p.w;
+        let col = i % p.w;
+        var v = b[col];
+        if (row == 0u) { v = a[col]; }
+        else if (row == 2u || row == 5u) { v = c[col]; }
+        else if (row == 3u) { v = d[col]; }
         y[i] = v;
     }
 }

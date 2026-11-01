@@ -245,3 +245,52 @@ mod long_audio_tests {
         assert!(e < 1e-4, "long encode rel_l2 {e:.3e} >= 1e-4");
     }
 }
+
+#[cfg(test)]
+mod m2_pair_tests {
+    use super::*;
+    use crate::dit::{DitEngine, ZC};
+    use crate::gpu::Gpu;
+    use crate::weights::Weights;
+
+    fn g(n: &str) -> crate::golden::Npy {
+        let dir = std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
+        read_npy(&std::path::Path::new(&dir).join(n)).unwrap()
+    }
+
+    /// The CFG batching runs both branches in ONE 6-row pass. Every row must see
+    /// exactly the arithmetic it saw when the branches were two separate
+    /// forwards -- otherwise the "same audio as the reference" property drifts
+    /// silently.
+    #[test]
+    fn cfg_pair_matches_two_single_forwards() {
+        let x = g("m2bisect_x.npy");
+        let c = g("m2bisect_c.npy");
+        let lh = g("m2bisect_lh.npy");
+        let t = g("m2bisect_t_scalar.npy").data[0];
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let dit = DitEngine::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
+        let xb = gpu.upload_f32(&x.data, "x");
+        let cb = gpu.upload_f32(&c.data, "c");
+        let lhb = gpu.upload_f32(&lh.data, "lh");
+        let zero = gpu.upload_f32(&vec![0f32; 896], "zero_c");
+
+        let cond = dit.dit_forward_dev(&xb, t, &cb, &lhb).unwrap();
+        let null = dit.dit_forward_dev(&xb, t, &zero, &lhb).unwrap();
+        let got_cond = gpu.read_f32(&cond, 3 * ZC).unwrap();
+        let got_null = gpu.read_f32(&null, 3 * ZC).unwrap();
+
+        let pair = dit.dit_forward_pair_dev(&xb, t, &cb, &lhb).unwrap();
+        let all = gpu.read_f32(&pair, 6 * ZC).unwrap();
+        let (pair_cond, pair_null) = all.split_at(3 * ZC);
+
+        let ec = rel_l2(pair_cond, &got_cond);
+        let en = rel_l2(pair_null, &got_null);
+        let maxc = pair_cond.iter().zip(&got_cond).fold(0f32, |a, (p, q)| a.max((p - q).abs()));
+        let maxn = pair_null.iter().zip(&got_null).fold(0f32, |a, (p, q)| a.max((p - q).abs()));
+        println!("cond: rel={ec:.3e} maxabs={maxc:.3e}   null: rel={en:.3e} maxabs={maxn:.3e}");
+        assert!(ec < 1e-6 && en < 1e-6, "batched branch drifted: rel {ec:.3e} / {en:.3e}");
+    }
+}

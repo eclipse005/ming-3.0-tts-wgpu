@@ -168,28 +168,46 @@ impl DitEngine {
         self.ops.gelu(x, n)
     }
 
-    fn blocks_forward(&self, blocks: &[XBlock], seq: &Buffer, t: usize) -> Result<Buffer> {
+    /// `group` = 0 for one sequence, or n for n independent n-token sequences
+    /// packed back to back (the (cond, null) batch). Every row still goes
+    /// through exactly the same arithmetic, so a grouped pass is bit-identical
+    /// to running the groups one at a time.
+    fn blocks_forward(
+        &self,
+        blocks: &[XBlock],
+        seq: &Buffer,
+        t: usize,
+        group: usize,
+    ) -> Result<Buffer> {
         let mut h = seq.clone();
         for b in blocks {
             let a = self.rms(&h, &b.n1, t);
             let q = self.mrow(&b.q, &a, t)?;
             let k = self.mrow(&b.k, &a, t)?;
             let v = self.mrow(&b.v, &a, t)?;
-            // rope: 16 heads, positions 0..t, checkpoint inv_freq, interleaved
-            self.ops.rope(&self.rope, &q, XHEADS, 1, 0, t);
-            self.ops.rope(&self.rope, &k, XHEADS, 1, 0, t);
+            // rope: 16 heads, checkpoint inv_freq, interleaved. Each group is its
+            // own 0..n-1 sequence, even though the rows are contiguous.
+            if group == 0 {
+                self.ops.rope(&self.rope, &q, XHEADS, 1, 0, t);
+                self.ops.rope(&self.rope, &k, XHEADS, 1, 0, t);
+            } else {
+                let mut row = 0;
+                while row < t {
+                    self.ops.rope_rows(&self.rope, &q, XHEADS, 1, 0, group, row);
+                    self.ops.rope_rows(&self.rope, &k, XHEADS, 1, 0, group, row);
+                    row += group;
+                }
+            }
             // stage k/v into the shared cache layout and attend bidirectionally
             let kc = &self.kv_k;
             let vc = &self.kv_v;
             self.ops.kv_write(&k, kc, t, 0, 512, XHEADS);
             self.ops.kv_write(&v, vc, t, 0, 512, XHEADS);
-            let attn = self.ops.attend(
-                &AttendParams::full(t, 64, XH, DIT_KV_CAP),
-                &q,
-                kc,
-                vc,
-                XHEADS,
-            );
+            let mut ap = AttendParams::full(t, 64, XH, DIT_KV_CAP);
+            if group > 0 {
+                ap = ap.with_group(group);
+            }
+            let attn = self.ops.attend(&ap, &q, kc, vc, XHEADS);
             let o = self.mrow(&b.o, &attn, t)?;
             h = self.add(&h, &o, t * XH);
             let a2 = self.rms(&h, &b.n2, t);
@@ -217,6 +235,9 @@ impl DitEngine {
     /// One DiT forward for a single (cond or null) branch, fully on the device.
     /// x/c/lh are device buffers ([64] / [896] / [64]); the result is [3, 64]
     /// with the prediction in row 2 -- callers read from offset 2 * ZC.
+    /// Production uses [`Self::dit_forward_pair_dev`]; this one is the reference
+    /// the pair is tested against.
+    #[cfg(test)]
     pub fn dit_forward_dev(
         &self,
         x: &Buffer,
@@ -235,9 +256,39 @@ impl DitEngine {
 
         // assemble seq [3, 1024] = [y, x_hist, x_now]
         let seq = self.ops.pack3(&y, &xh, &xn, XH, 3);
-        let h = self.blocks_forward(&self.blocks, &seq, 3)?;
+        let h = self.blocks_forward(&self.blocks, &seq, 3, 0)?;
         let fin = self.rms(&h, &self.fin_norm, 3);
         self.mrow(&self.fin_lin, &fin, 3)
+    }
+
+    /// One DiT forward for the (cond, null) pair: rows 0..2 are the conditional
+    /// branch, rows 3..5 the null one, sharing every weight read.
+    ///
+    /// This is the same decomposition the reference gets from batching
+    /// `forward_with_cfg` (batch 2). Each row runs exactly the arithmetic it ran
+    /// when the two branches were separate forwards, so the result is identical
+    /// up to whatever the batched GEMM path does with its reduction order.
+    pub fn dit_forward_pair_dev(
+        &self,
+        x: &Buffer,
+        t: f32,
+        c: &Buffer,
+        lh: &Buffer,
+    ) -> Result<Buffer> {
+        let temb = self.gpu.upload_f32(&Self::timestep_embedding(t), "temb");
+        let tm1 = self.mrow(&self.t_mlp1, &temb, 1)?;
+        let sil = self.silu_mul(&tm1, &self.ones_1024, XH);
+        let tm2 = self.mrow(&self.t_mlp2, &sil, 1)?;
+        let xn = self.mrow(&self.x_emb, x, 1)?;
+        let xh = self.mrow(&self.x_emb, lh, 1)?;
+        let ce_c = self.mrow(&self.c_emb, c, 1)?;
+        let ce_n = self.mrow(&self.c_emb, &self.zero_c, 1)?;
+        let y_c = self.add(&tm2, &ce_c, XH);
+        let y_n = self.add(&tm2, &ce_n, XH);
+        let seq = self.ops.pack6(&y_c, &xh, &xn, &y_n, XH);
+        let h = self.blocks_forward(&self.blocks, &seq, 6, 3)?;
+        let fin = self.rms(&h, &self.fin_norm, 6);
+        self.mrow(&self.fin_lin, &fin, 6)
     }
 
     /// Host-facing variant: same maths, one round-trip for the prediction.
@@ -317,7 +368,7 @@ impl DitEngine {
         let xn = self.mrow(&self.agg_x_emb, &xb, 1)?;
         // seq [2, 1024] = [cls, x] -- only the first two rows are read
         let seq = self.ops.pack3(&self.agg_word, &xn, &xn, XH, 2);
-        let h = self.blocks_forward(&self.agg_blocks, &seq, 2)?;
+        let h = self.blocks_forward(&self.agg_blocks, &seq, 2, 0)?;
         let fin = self.rms(&h, &self.agg_fin_norm, 2);
         // project both rows on the device, then read back only the cls row
         let out = self.mrow(&self.agg_fin_lin, &fin, 2)?;
@@ -354,9 +405,9 @@ impl DitEngine {
         let xnb = self.gpu.upload_f32(&xn, "seq.xn");
         let seq = self.ops.pack3(&yb, &xhb, &xnb, XH, 3);
         // block 0 alone
-        let b0b = self.blocks_forward(&self.blocks[0..1], &seq, 3)?;
+        let b0b = self.blocks_forward(&self.blocks[0..1], &seq, 3, 0)?;
         let b0 = self.gpu.read_f32(&b0b, 3 * XH)?;
-        let h = self.blocks_forward(&self.blocks, &seq, 3)?;
+        let h = self.blocks_forward(&self.blocks, &seq, 3, 0)?;
         let fin = self.rms(&h, &self.fin_norm, 3);
         let fin_all = self.gpu.read_f32(&fin, 3 * XH)?;
         let out = gemv_bf16w_buf(&self.gpu, &self.fin_lin.w, &self.fin_lin.b,
@@ -412,13 +463,13 @@ impl DitEngine {
         let mut out = Vec::with_capacity(ZC);
         for step in 0..STEPS {
             let dt = tv[step + 1] - tv[step];
-            let pred = self.dit_forward_dev(&y, tv[step], &zb, &lhb)?;
-            let null = self.dit_forward_dev(&y, tv[step], &self.zero_c, &lhb)?;
+            // One batched pass for both CFG branches: the weights are read once
+            // instead of twice, and the per-row maths is unchanged.
+            let pair = self.dit_forward_pair_dev(&y, tv[step], &zb, &lhb)?;
             if let Some((tx, tp, tn)) = trace.as_mut() {
-                let off = (2 * ZC * 4) as u64;
                 tx.push(self.gpu.read_f32(&y, ZC)?);
-                tp.push(self.gpu.read_f32_offset(&pred, ZC, off)?);
-                tn.push(self.gpu.read_f32_offset(&null, ZC, off)?);
+                tp.push(self.gpu.read_f32_offset(&pair, ZC, (2 * ZC * 4) as u64)?);
+                tn.push(self.gpu.read_f32_offset(&pair, ZC, (5 * ZC * 4) as u64)?);
             }
             let k = if temperature > 0.0 {
                 sigma * temperature.sqrt() * dt.abs().sqrt()
@@ -432,7 +483,7 @@ impl DitEngine {
             } else {
                 sde_zero.clone()
             };
-            self.ops.cfm_step(&pred, &null, &sde_buf, &y, cfg, dt, k, 2 * ZC, ZC);
+            self.ops.cfm_step(&pair, &pair, &sde_buf, &y, cfg, dt, k, 2 * ZC, 5 * ZC, ZC);
         }
         out.extend_from_slice(&self.gpu.read_f32(&y, ZC)?);
         Ok(out)

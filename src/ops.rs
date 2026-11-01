@@ -181,6 +181,10 @@ pub struct AttendParams {
     pub window: usize,
     /// KV cache capacity per head, in tokens.
     pub cap: usize,
+    /// 0 = one sequence. n = the t_q rows are n independent n-token sequences
+    /// packed back to back, each attending only its own slice. This is how the
+    /// (cond, null) branches share one DiT pass.
+    pub group: usize,
 }
 
 impl AttendParams {
@@ -203,6 +207,7 @@ impl AttendParams {
             stride,
             window: 0,
             cap,
+            group: 0,
         }
     }
 
@@ -219,7 +224,14 @@ impl AttendParams {
             stride,
             window: 0,
             cap,
+            group: 0,
         }
+    }
+
+    /// Rows are `n` independent `n`-token sequences (CFG batching).
+    pub fn with_group(mut self, n: usize) -> Self {
+        self.group = n;
+        self
     }
 
     pub fn with_window(mut self, window: usize) -> Self {
@@ -234,6 +246,7 @@ pub struct Ops {
     k_rms: crate::nn::Kernel,
     k_linear: crate::nn::Kernel,
     k_linear_t4: crate::nn::Kernel,
+    k_linear_t8: crate::nn::Kernel,
     k_rope: crate::nn::Kernel,
     k_attend: crate::nn::Kernel,
     k_kv_write: crate::nn::Kernel,
@@ -241,6 +254,7 @@ pub struct Ops {
     k_gelu: crate::nn::Kernel,
     k_add: crate::nn::Kernel,
     k_pack3: crate::nn::Kernel,
+    k_pack6: crate::nn::Kernel,
     k_cfm: crate::nn::Kernel,
 }
 
@@ -250,6 +264,7 @@ impl Ops {
             k_rms: kernel(&gpu, shaders::RMSNORM, 2),
             k_linear: kernel(&gpu, shaders::GEMV_MROW, 3),
             k_linear_t4: kernel(&gpu, shaders::GEMV_MROW_T4, 3),
+            k_linear_t8: kernel(&gpu, shaders::GEMV_MROW_T8, 3),
             k_rope: kernel(&gpu, shaders::ROPE, 2),
             k_attend: kernel(&gpu, shaders::ATTEND, 3),
             k_kv_write: kernel(&gpu, shaders::KV_WRITE, 1),
@@ -257,6 +272,7 @@ impl Ops {
             k_gelu: kernel(&gpu, shaders::GELU_TANH, 1),
             k_add: kernel(&gpu, shaders::ADD, 2),
             k_pack3: kernel(&gpu, shaders::PACK3, 3),
+            k_pack6: kernel(&gpu, shaders::PACK6, 4),
             k_cfm: kernel(&gpu, shaders::CFM_STEP, 3),
             gpu,
         }
@@ -285,8 +301,15 @@ impl Ops {
     }
 
     pub fn linear_into(&self, lin: &Lin, x: &Buffer, y: &Buffer, t: usize) {
-        if t <= 4 {
-            self.k_linear_t4.run(
+        let kt = if t <= 4 {
+            Some(&self.k_linear_t4)
+        } else if t <= 8 {
+            Some(&self.k_linear_t8)
+        } else {
+            None
+        };
+        if let Some(k) = kt {
+            k.run(
                 &self.gpu,
                 &uni4(
                     lin.rows as u32,
@@ -340,10 +363,28 @@ impl Ops {
         pos_base: usize,
         tokens: usize,
     ) {
+        self.rope_rows(tables, buf, n_heads, interleaved, pos_base, tokens, 0);
+    }
+
+    /// Same rotation, but written to rows `row_base .. row_base + tokens`, with
+    /// positions still starting at `pos_base`. Batched branches need this: the
+    /// null branch sits at rows 3..6 but must rotate with positions 0..3.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rope_rows(
+        &self,
+        tables: &RopeTables,
+        buf: &Buffer,
+        n_heads: usize,
+        interleaved: u32,
+        pos_base: usize,
+        tokens: usize,
+        row_base: usize,
+    ) {
         let mut u = [0u8; 16];
         u[0..4].copy_from_slice(&(n_heads as u32).to_le_bytes());
         u[4..8].copy_from_slice(&(pos_base as u32).to_le_bytes());
         u[8..12].copy_from_slice(&interleaved.to_le_bytes());
+        u[12..16].copy_from_slice(&(row_base as u32).to_le_bytes());
         self.k_rope.run(&self.gpu, &u, &[&tables.cos, &tables.sin], buf, tokens as u32, 1);
     }
 
@@ -383,6 +424,7 @@ impl Ops {
         u[24..28].copy_from_slice(&(p.stride as u32).to_le_bytes());
         u[28..32].copy_from_slice(&(p.window as u32).to_le_bytes());
         u[32..36].copy_from_slice(&(p.cap as u32).to_le_bytes());
+        u[36..40].copy_from_slice(&(p.group as u32).to_le_bytes());
         self.k_attend
             .run(&self.gpu, &u, &[q, kc, vc], &y, n_q_heads as u32, p.t_q as u32);
         y
@@ -402,7 +444,31 @@ impl Ops {
         y
     }
 
+    /// Assemble [y_cond, x_hist, x_now, y_null, x_hist, x_now] of width `dim`.
+    pub fn pack6(
+        &self,
+        y_cond: &Buffer,
+        x_hist: &Buffer,
+        x_now: &Buffer,
+        y_null: &Buffer,
+        dim: usize,
+    ) -> Buffer {
+        let rows = 6;
+        let y = self.gpu.storage((rows * dim * 4) as u64, "pack6.y");
+        self.k_pack6.run(
+            &self.gpu,
+            &uni1(dim as u32),
+            &[y_cond, x_hist, x_now, y_null],
+            &y,
+            ((rows * dim + 255) / 256) as u32,
+            1,
+        );
+        y
+    }
+
     /// One CFM Euler step, on device: y += (pred + (pred-null)*cfg)*dt + k*sde.
+    /// `off` / `off_null` locate the two predictions inside their buffers (the
+    /// batched path keeps both in one).
     pub fn cfm_step(
         &self,
         pred: &Buffer,
@@ -413,6 +479,7 @@ impl Ops {
         dt: f32,
         k: f32,
         off: usize,
+        off_null: usize,
         n: usize,
     ) {
         let mut u = [0u8; 32];
@@ -421,6 +488,7 @@ impl Ops {
         u[8..12].copy_from_slice(&cfg.to_le_bytes());
         u[12..16].copy_from_slice(&k.to_le_bytes());
         u[16..20].copy_from_slice(&(off as u32).to_le_bytes());
+        u[20..24].copy_from_slice(&(off_null as u32).to_le_bytes());
         self.k_cfm
             .run(&self.gpu, &u, &[pred, null, sde], y, ((n + 255) / 256) as u32, 1);
     }
