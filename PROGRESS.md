@@ -489,23 +489,13 @@ GELU 用 erf 而不是 tanh 那件事仍然成立（每元素差 1e-3，是真�
 
 ## 5. 未完成与已知问题
 
-### P0：RTF 2.51 → 目标 < 0.88（唯一未达成的验收项）
+### P0：RTF 2.0 → 目标 < 0.88（唯一未达成的验收项）
 
-DiT 是唯一战场（79%）。单次 DiT 前向 8 ms，对应 192 MB 权重流量 → 约 24 GB/s，
-只有卡面带宽的 ~1/8。**已验证排除**：dispatch 提交（已并成单 pass）、readback
-（环内零同步）、buffer 分配（2.8 µs/次）、4-word 展开（反而更慢 → 不是纯延迟受限）。
+**详细交接见 0.5 节**（时间账 / 已确认事实 / 已排除方案 / 还没试的四条 / 工具门限）。
 
-按收益排序：
-
-1. **pred/null 合批**：Python 用 `forward_with_cfg` 一次 batch-2 前向，权重只读一遍。
-   给 `AttendParams` 加分组注意力（前 3 行与后 3 行互不可见）+ 一个 PACK6 即可。
-   预期 DiT 6.36 s → ~3.5 s。改动点：`src/shaders.rs`（ATTEND 加 group 参数）、
-   `src/dit.rs`（`dit_forward_dev` 拼 6 行、CFM 读两处偏移）。
-2. **tiled GEMM**：`Ops::linear` 换成"权重 tile 进 shared memory、对全部 token 复用"。
-   这是把 24 GB/s 拉向 100+ GB/s 的正路，预期再 2-3 倍。改动点：`src/shaders.rs`
-   新 kernel + `src/ops.rs::linear_into`。
-3. bind group 缓存（`nn::record` 是唯一入口）、按步预分配 scratch（DiT 形状固定 t=3）。
-4. LLM 段 1.23 s：每 token 读 1.92 GiB 权重，是带宽地板；只有量化能再降。
+进度：pred/null 合批已完成（2.51 → 2.03），vec4 权重加载让 M=1 从 20 → 62-65 GB/s。
+剩下的关键是把"每 warp 一行"的 GEMV 换成真正的 2D tiled GEMM（模板：
+`D:\ctc-forced-aligner-wgpu\src\gemm_kernel.rs`，同卡快 48×）。
 
 ### P1：轨迹分岔（已收口：6 例连时长都错 → 10 例"只在后段"）
 
@@ -518,7 +508,7 @@ cuBLAS 归约 + CUDA 超越函数——4.6 已经用测量证明不可达。**�
 - `--spk_emb_path`（.pt 文件）未实现：需要 torch 序列化格式，目前显式报错。
 - pynini 文本规范化未移植：`--no_text_normalization` 关闭时的数字/符号规范化缺失。
   非中文语言走"绕过 TN"分支，所以 F 组不受影响。
-- 多分片路径（`max_length` 切出 >1 个 fragment）存在但**没有验收样本**。
+- 多分片路径（`max_length` 切出 >1 个 fragment）已补验收（4.7 的 S4/S5：2 片、6 片、21.6 s，rel 1.3e-2）。
 - 流式推理未做（原版非流式路径也没用它）。
 
 ### P3：内存
