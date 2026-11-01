@@ -232,24 +232,44 @@ impl LlmEngine {
         // It is how we answer "can this checkpoint run in fp16": fp16 tops out
         // at 65504, so whichever layer crosses that is the one that would NaN.
         let probe = std::env::var("MING_ACT_RANGE").is_ok();
+        static PREFILL_PROFILED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        let pprof = std::env::var_os("MING_LM_PREFILL_PROFILE").is_some()
+            && !PREFILL_PROFILED.swap(true, std::sync::atomic::Ordering::Relaxed);
+        let mut mark_at = std::time::Instant::now();
         for (li, layer) in self.layers.iter().enumerate() {
+            macro_rules! mark {
+                ($name:expr) => {
+                    if pprof && li == 0 {
+                        self.gpu.flush();
+                        let now = std::time::Instant::now();
+                        println!("      lm t={t} {:?} {:?}", $name, now - mark_at);
+                        mark_at = now;
+                    }
+                };
+            }
             let a = self.rms(&h, &layer.norm1, t);
             let q = self.mrow(&layer.q, &a, t)?;
             let k = self.mrow(&layer.k, &a, t)?;
             let v = self.mrow(&layer.v, &a, t)?;
+            mark!("qkv");
             self.rope_inplace(&q, Q_HEADS, t, pos_base);
             self.rope_inplace(&k, KV_HEADS, t, pos_base);
             self.kv_write(&k, &layer.kc, t, pos_base);
             self.kv_write(&v, &layer.vc, t, pos_base);
             let attn = self.attend(&q, &layer.kc, &layer.vc, t, pos_base)?;
+            mark!("rope+kv+attn");
             let o = self.mrow(&layer.o, &attn, t)?;
             h = self.add(&h, &o, t * HIDDEN);
+            mark!("o+add");
             let a2 = self.rms(&h, &layer.norm2, t);
             let g = self.mrow(&layer.gate, &a2, t)?;
             let up = self.mrow(&layer.up, &a2, t)?;
+            mark!("gate+up");
             let sil = self.silu_mul(&g, &up, t * FF);
             let d = self.mrow(&layer.down, &sil, t)?;
             h = self.add(&h, &d, t * HIDDEN);
+            mark!("silu+down+add");
             if probe {
                 if let Ok(v) = self.gpu.read_f32(&h, t * HIDDEN) {
                     let m = v.iter().fold(0f32, |a, b| a.max(b.abs()));

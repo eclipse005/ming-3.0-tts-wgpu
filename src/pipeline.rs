@@ -265,8 +265,8 @@ impl Pipeline {
         }
         if std::env::var("MING_PROFILE").is_ok() {
             println!(
-                "    profile: prefill {:?} | dit {:?} | llm+agg {:?}",
-                prefill, dit_time, llm_time
+                "    profile: prefill {:?} (t={}) | dit {:?} | llm+agg {:?}",
+                prefill, t, dit_time, llm_time
             );
         }
         Ok(LoopTrace {

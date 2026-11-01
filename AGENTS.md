@@ -55,13 +55,20 @@ target\release\ming-tts-wgpu.exe synth ^
 
 ## 当前唯一的未完成项
 
-RTF 约 **1.0–1.2**（随热状态），目标 < 0.88。Rust 已快过 Python eager，但
-Python CUDA Graph 仍领先 1.3–1.5×。差距主要是 13 万次 dispatch 的 GPU 前端开销，
-下一步做 dispatch 合并（qkv / rope+KV+attention / matmul epilogue），不要继续试
-异步 submit（已实测更慢）。当前快路径可用 `MING_SCRATCH=0`、`MING_LM_FAST=0`、
-`MING_BIND_CACHE=0` 回退做 A/B；详见 PROGRESS 0.5.7。
+RTF **1.07–1.18**（长句 5.00 s 音频 / 63 latents：解码环 5.35–5.91 s，随热状态），
+目标 < 0.88；Python CUDA Graph 是 5.11 s（RTF 1.008），已基本追平。
 
-```bat
-:: 分段耗时
-set MING_PROFILE=1
-```
+**先读 PROGRESS.md 0.5.8** —— 它推翻了"瓶颈是 dispatch 数"这个旧判断。实测结论：
+cuBLAS fp32 在同形状比我们快 2×（这张卡没有 bf16 原生支持），它的有效读取带宽
+~120 GB/s 而我们 47 GB/s；且 t=117 的 prefill 里**同族 kernel 在 13104 个 workgroup
+下跑到 150 GB/s**，t=6 只有 128 个 workgroup 时只有 47 GB/s。**差距是 workgroup
+并行度，不是 dispatch 数、不是算术量。**
+
+下一步按收益排序：
+1. **split-K**（最明确）：DiT 每层 32–128 个 workgroup，按 K 切 2–4 份 + 融合 bias。
+2. prefill 换真 GEMM（分块已把冗余从 117 降到 20，但每块 workgroup 数仍偏低）。
+3. 合并 dispatch（gelu 融 ff_in epilogue、add 融 rms），每 block 省 2 次。
+
+A/B 回退口：`MING_T6=base|v8..v14`、`MING_T1=base|half|v1..v4`、`MING_SCRATCH=0`、
+`MING_LM_FAST=0`、`MING_BIND_CACHE=0`。分段耗时 `MING_PROFILE=1`，
+prefill 单层分段 `MING_LM_PREFILL_PROFILE=1`。

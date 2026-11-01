@@ -655,6 +655,216 @@ pub fn gemv_t6_fourlane() -> String {
     gemv_t6_lanes(4, 256)
 }
 
+/// Six-token linear with fully vectorised loads and `rpl` output rows per lane
+/// group.
+///
+/// [`gemv_t6_lanes`] issues four scalar `u32` weight loads and 24 scalar
+/// activation loads per 8-wide K granule, i.e. 28 load instructions for 48 FMAs.
+/// This card has no native bf16, so the kernel is instruction- and
+/// latency-bound long before it is bandwidth-bound: cuBLAS in fp32 streams
+/// ~120 GB/s here while the scalar kernel sustains 29-43 GB/s.
+///
+/// Here one `vec4<u32>` covers the same 8 K elements (16 B) and the activations
+/// come in as `vec4<f32>`, two per token. With two rows per lane group that is
+/// 2 + 12 = 14 loads for 96 FMAs, or 7 loads per row per granule instead of 28.
+///
+/// `unroll` granules are processed per loop iteration and their loads are all
+/// emitted before the first FMA. One weight load in flight per lane group is not
+/// enough to cover ~600 cycles of DRAM latency from 8-16 warps per SM, which is
+/// why the single-granule body plateaus near 46 GB/s.
+///
+/// `in4` must be a multiple of `unroll * lanes`; callers guarantee
+/// `in_features % 256 == 0`, i.e. `in4 % 32 == 0`, so this holds for
+/// `lanes in {8, 32}` with `unroll in {1, 2, 4}`.
+pub fn gemv_t6_vec4(lanes: u32, threads: u32, rpl: u32, unroll: u32, guarded: bool) -> String {
+    assert!(lanes > 0 && 32 % lanes == 0, "lanes must divide a warp");
+    assert!(threads % 32 == 0 && threads % lanes == 0);
+    assert!(rpl >= 1 && unroll >= 1);
+    let rowgroups = threads / lanes;
+    let rows_per_wg = rowgroups * rpl;
+    let first_step = lanes / 2;
+    let stride = lanes * unroll;
+
+    let mut decl = String::new();
+    for m in 0..rpl {
+        for t in 0..6u32 {
+            decl.push_str(&format!("    var a{m}_{t} = 0.0;\n"));
+        }
+    }
+
+    let mut bases = String::from("        let wb0 = r0 * in4;\n");
+    for m in 1..rpl {
+        bases.push_str(&format!(
+            "        let wb{m} = select(wb0, (r0 + {m}u) * in4, r0 + {m}u < p.rows);\n"
+        ));
+    }
+
+    let mut body = String::new();
+    body.push_str("            let g4 = 2u * g;\n");
+    // Issue every weight load of the unrolled group first so the memory
+    // pipeline has `rpl * unroll` requests outstanding before the first FMA.
+    for m in 0..rpl {
+        for u in 0..unroll {
+            let tail = if u == 0 {
+                String::new()
+            } else {
+                format!(" + {}u", u * lanes)
+            };
+            body.push_str(&format!(
+                "            let uw{m}_{u} = w[wb{m} + g{tail}];\n"
+            ));
+        }
+    }
+    for m in 0..rpl {
+        for u in 0..unroll {
+            for (j, comp) in ["x", "y", "z", "w"].iter().enumerate() {
+                body.push_str(&format!(
+                    "            let lo{m}_{u}_{j} = bf_lo(uw{m}_{u}.{comp});\n\
+                     \x20           let hi{m}_{u}_{j} = bf_hi(uw{m}_{u}.{comp});\n"
+                ));
+            }
+        }
+    }
+    // One token at a time: its activations stay live just long enough to feed
+    // every row accumulator, so peak pressure is `2 * unroll` vec4 of x rather
+    // than all six tokens at once.
+    for t in 0..6u32 {
+        // The guarded variant walks a sliding six-token window across a long
+        // prompt; the unguarded one is the DiT's fixed six-row batch and keeps
+        // the loop body free of both the token-offset add and the n_tok tests.
+        let tok = if guarded {
+            format!("(tok0 + {t}u) * x4 + ")
+        } else if t == 0 {
+            String::new()
+        } else {
+            format!("{t}u * x4 + ")
+        };
+        for u in 0..unroll {
+            let tail = if u == 0 {
+                String::new()
+            } else {
+                format!(" + {}u", 2 * u * lanes)
+            };
+            body.push_str(&format!(
+                "            let xa{t}_{u} = x[{tok}g4{tail}];\n\
+                 \x20           let xb{t}_{u} = x[{tok}g4{tail} + 1u];\n"
+            ));
+        }
+        if guarded {
+            body.push_str(&format!("            if (p.n_tok > {t}u) {{\n"));
+        }
+        for m in 0..rpl {
+            for u in 0..unroll {
+                body.push_str(&format!(
+                    "            a{m}_{t} = a{m}_{t} + lo{m}_{u}_0*xa{t}_{u}.x + hi{m}_{u}_0*xa{t}_{u}.y \
+                     + lo{m}_{u}_1*xa{t}_{u}.z + hi{m}_{u}_1*xa{t}_{u}.w \
+                     + lo{m}_{u}_2*xb{t}_{u}.x + hi{m}_{u}_2*xb{t}_{u}.y \
+                     + lo{m}_{u}_3*xb{t}_{u}.z + hi{m}_{u}_3*xb{t}_{u}.w;\n"
+                ));
+            }
+        }
+        if guarded {
+            body.push_str("            }\n");
+        }
+    }
+
+    let mut reduce = String::new();
+    for m in 0..rpl {
+        for t in 0..6u32 {
+            let i = format!("red[rl * {rpl}u + {m}u][{t}]");
+            reduce.push_str(&format!(
+                "            {i}[lane] = {i}[lane] + {i}[lane + s];\n"
+            ));
+        }
+    }
+
+    let mut store = String::new();
+    for m in 0..rpl {
+        let guard = if m == 0 {
+            "r0 < p.rows".to_string()
+        } else {
+            format!("r0 + {m}u < p.rows")
+        };
+        store.push_str(&format!("        if ({guard}) {{\n"));
+        store.push_str(&format!("            let row = r0 + {m}u;\n"));
+        store.push_str("            let bias = b[row];\n");
+        for t in 0..6u32 {
+            let (open, close, idx) = if guarded {
+                (
+                    format!("            if (p.n_tok > {t}u) {{\n"),
+                    "            }\n".to_string(),
+                    format!("(tok0 + {t}u) * p.rows + row"),
+                )
+            } else if t == 0 {
+                (String::new(), String::new(), "row".to_string())
+            } else {
+                (String::new(), String::new(), format!("{t}u * p.rows + row"))
+            };
+            store.push_str(&open);
+            store.push_str(&format!(
+                "            y[{idx}] = red[rl * {rpl}u + {m}u][{t}][0] + bias;\n"
+            ));
+            store.push_str(&close);
+        }
+        store.push_str("        }\n");
+    }
+
+    let mut store_in = String::new();
+    for m in 0..rpl {
+        for t in 0..6u32 {
+            store_in.push_str(&format!(
+                "    red[rl * {rpl}u + {m}u][{t}][lane] = a{m}_{t};\n"
+            ));
+        }
+    }
+
+    format!(
+        r#"struct Params {{ rows: u32, in_words: u32, n_tok: u32, tok0: u32, }}
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<vec4<u32>>;
+@group(0) @binding(2) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;
+var<workgroup> red: array<array<array<f32, {lanes}>, 6>, {rows_per_wg}>;
+
+fn bf_lo(u: u32) -> f32 {{ return bitcast<f32>((u & 0xFFFFu) << 16u); }}
+fn bf_hi(u: u32) -> f32 {{ return bitcast<f32>(u & 0xFFFF0000u); }}
+
+@compute @workgroup_size({threads})
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {{
+    let lane = lid.x % {lanes}u;
+    let rl = lid.x / {lanes}u;
+    let r0 = wg.x * {rows_per_wg}u + rl * {rpl}u;
+    let inw = p.in_words;
+    let in4 = inw / 4u;
+    let x4 = inw / 2u;
+    let tok0 = p.tok0;
+{decl}    if (r0 < p.rows) {{
+{bases}        var g = lane;
+        loop {{
+            if (g >= in4) {{ break; }}
+{body}            g = g + {stride}u;
+        }}
+    }}
+{store_in}    workgroupBarrier();
+    var s = {first_step}u;
+    loop {{
+        if (s == 0u) {{ break; }}
+        if (lane < s) {{
+{reduce}        }}
+        workgroupBarrier();
+        s = s / 2u;
+    }}
+    if (lane == 0u) {{
+{store}    }}
+}}
+"#
+    )
+}
+
 /// Single-token linear with half a warp per row.
 ///
 /// Same vec4 weight/activation granules as [`GEMV_V4_T1`], but two rows share a
@@ -720,6 +930,127 @@ fn main(
     }}
 }}
 "#
+    )
+}
+
+/// Single-token linear with a configurable number of lanes per output row and
+/// `rpl` rows per lane group.
+///
+/// Same vec4 weight/activation granules as [`GEMV_V4_T1`]. The parameters
+/// matter because the LLM decoder mixes two very different shapes: the
+/// 4864x896 projections can fill the machine with any row width, while the
+/// 896x4864 down-projection has only 896 rows and needs a narrow row width to
+/// emit enough workgroups. Lane count also sets the barrier-tree depth (log2).
+pub fn gemv_t1_vec4(lanes: u32, threads: u32, rpl: u32) -> String {
+    assert!(lanes > 0 && 32 % lanes == 0, "lanes must divide a warp");
+    assert!(threads % 32 == 0 && threads % lanes == 0);
+    assert!(rpl >= 1);
+    let rowgroups = threads / lanes;
+    let rows_per_wg = rowgroups * rpl;
+
+    let mut decl = String::new();
+    for m in 0..rpl {
+        for j in 0..4u32 {
+            decl.push_str(&format!("    var a{m}_{j} = 0.0;\n"));
+        }
+    }
+
+    let mut bases = String::from("        let wb0 = r0 * p.kg;\n");
+    for m in 1..rpl {
+        bases.push_str(&format!(
+            "        let wb{m} = select(wb0, (r0 + {m}u) * p.kg, r0 + {m}u < p.rows);\n"
+        ));
+    }
+
+    let mut body = String::new();
+    body.push_str("            let xa = x[2u * i];\n            let xb = x[2u * i + 1u];\n");
+    for m in 0..rpl {
+        body.push_str(&format!("            let wv{m} = w[wb{m} + i];\n"));
+        // granule halves: (weight component, activation vector, lo, hi)
+        let terms = [
+            ("x", "xa", "x", "y"),
+            ("y", "xa", "z", "w"),
+            ("z", "xb", "x", "y"),
+            ("w", "xb", "z", "w"),
+        ];
+        for (j, (comp, vec, lo, hi)) in terms.iter().enumerate() {
+            body.push_str(&format!(
+                "            a{m}_{j} = a{m}_{j} + bf_lo(wv{m}.{comp}) * {vec}.{lo} \
+                 + bf_hi(wv{m}.{comp}) * {vec}.{hi};\n"
+            ));
+        }
+    }
+
+    let mut store_in = String::new();
+    for m in 0..rpl {
+        store_in.push_str(&format!(
+            "    red[rl * {rpl}u + {m}u][lane] = a{m}_0 + a{m}_1 + a{m}_2 + a{m}_3;\n"
+        ));
+    }
+
+    let mut reduce = String::new();
+    for m in 0..rpl {
+        let i = format!("red[rl * {rpl}u + {m}u]");
+        reduce.push_str(&format!(
+            "            {i}[lane] = {i}[lane] + {i}[lane + s];\n"
+        ));
+    }
+
+    let mut store = String::new();
+    for m in 0..rpl {
+        let guard = if m == 0 {
+            "r0 < p.rows".to_string()
+        } else {
+            format!("r0 + {m}u < p.rows")
+        };
+        store.push_str(&format!(
+            "        if ({guard}) {{\n            let row = r0 + {m}u;\n\
+             \x20           y[row] = red[rl * {rpl}u + {m}u][0] + b[row];\n        }}\n"
+        ));
+    }
+
+    format!(
+        r#"struct Params {{ rows: u32, kg: u32, }}
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> w: array<vec4<u32>>;
+@group(0) @binding(2) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;
+var<workgroup> red: array<array<f32, {lanes}>, {rows_per_wg}>;
+
+fn bf_lo(u: u32) -> f32 {{ return bitcast<f32>((u & 0xFFFFu) << 16u); }}
+fn bf_hi(u: u32) -> f32 {{ return bitcast<f32>(u & 0xFFFF0000u); }}
+
+@compute @workgroup_size({threads})
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {{
+    let lane = lid.x % {lanes}u;
+    let rl = lid.x / {lanes}u;
+    let r0 = wg.x * {rows_per_wg}u + rl * {rpl}u;
+    let kg = p.kg;
+{decl}    if (r0 < p.rows) {{
+{bases}        var i = lane;
+        loop {{
+            if (i >= kg) {{ break; }}
+{body}            i = i + {lanes}u;
+        }}
+    }}
+{store_in}    workgroupBarrier();
+    var s = {first}u;
+    loop {{
+        if (s == 0u) {{ break; }}
+        if (lane < s) {{
+{reduce}        }}
+        workgroupBarrier();
+        s = s / 2u;
+    }}
+    if (lane == 0u) {{
+{store}    }}
+}}
+"#,
+        first = lanes / 2
     )
 }
 

@@ -3,9 +3,9 @@
 > **一句话状态**：Ming-3.0-tts-0.5b 已完整移植为纯 Rust + wgpu（无 Python / torch /
 > CUDA 依赖），五个里程碑全部数值对齐；36 个参数用例 **36/36 时长逐采样点一致**，
 > 26 例波形级重合（rel_l2 ≤ 5e-2，最好 3.6e-5），其余 10 例只有后段的相位差
-> （log-mel ≥ 0.9959，见 4.4）。**唯一未达成的验收项是 RTF：同热 A/B 解码环又降
-> 19–24%，Rust 已快过 Python eager，但 Python CUDA Graph 仍快约 1.3–1.5×；
-> 差距集中在 13 万次 dispatch 的 GPU 前端开销。见 0.5.7。**
+> （log-mel ≥ 0.9959，见 4.4）。**唯一未达成的验收项是 RTF：长句解码环 5.35–5.91 s
+> （5.00 s 音频，RTF 1.07–1.18），Python CUDA Graph 是 5.11 s（RTF 1.008）——
+> 已基本追平，差距只剩 DiT 的 workgroup 并行度。见 0.5.8。**
 
 接手顺序：**本文** → [REVIEW.md](REVIEW.md)（代码结构评审与重构记录）→
 [WGPU_PORT_ANALYSIS.md](WGPU_PORT_ANALYSIS.md)（最初的拆解方案）。
@@ -176,12 +176,85 @@ Python 的 CUDA Graph 把 13 万次 kernel 发射的 GPU 前端成本压到接�
 matmul 融合 residual/gelu epilogue。CUDA Graph 在 wgpu 没有等价物，不应再尝试用
 “异步 submit”绕（已实测更慢）。
 
+> **0.5.8 更正**：上面的"差距在 dispatch 数"判断是错的。0.5.8 用 cuBLAS 分形状实测
+> 证明差距在 workgroup 并行度（t=6 只有 128 个 workgroup → 47 GB/s；t=117 的
+> 13104 个 → 150 GB/s）。qkv 三合一当时也实测无收益。dispatch 合并保留为
+> 第三优先级，split-K 才是第一优先级。
+
+### 0.5.8 第四轮：向量化 + 多行复用 + prefill 分块（2026-11-01 傍晚）
+
+**为什么会找错方向三周**
+
+前三轮一直在"调度开销"上找答案，因为 `linear_bandwidth` 显示 t=6 只有 40–47 GB/s，
+而同卡 M=1 GEMV 能到 226 GB/s。这一轮先测了 cuBLAS 的真实形状上限，结论把前面的推断
+推翻了：
+
+| 形状（t=6） | 我们（bf16 权重） | cuBLAS fp32 | cuBLAS bf16 |
+|---|---:|---:|---:|
+| 4096×1024 | 197 µs | **139 µs** | 294 µs |
+| 1024×4096 | 208 µs | **156 µs** | 481 µs |
+| 1024×1024 | 45 µs | 55 µs | 123 µs |
+
+两个事实：① 这张 Pascal 卡**没有 bf16 原生支持**，cuBLAS 走 fp32 反而比 bf16 快
+2–3×（Python 的 DiT 就是 fp32，所以它的 Flow 2.92 s 是算得出来的）；
+② cuBLAS fp32 读 8 字节/元素的墙钟比我们读 4 字节还短，说明**它的有效读取带宽
+（~120 GB/s）是我们的 2.8 倍**——差距是访存并行度，不是算术、不是 dispatch。
+
+**做了什么**
+
+1. **全向量化六 token kernel**（`shaders::gemv_t6_vec4`）。原来的 kernel 每个 8 元素
+   K granule 要发 4 条标量 `u32` 权重加载 + 24 条标量激活加载（28 条加载 / 48 FMA）；
+   改成 `vec4<u32>` 权重 + `vec4<f32>` 激活后，配合每 lane 组 2 行，变成 14 条加载 /
+   96 FMA，即**每行每 granule 从 28 条降到 7 条加载**。
+2. **K 方向展开 2 个 granule**（`v12`）。单个 granule 只有 2 条权重加载在飞，覆盖不了
+   ~600 周期延迟；展开后 4 条并发，三个形状从 29/40/45 升到 **47/45/48 GB/s**。
+   展开 4 个（`v13`）反而回落（寄存器压力），已实测排除。
+3. **单 token 同样处理**（`gemv_t1_vec4`，默认 `8 lanes × 2 rows × 128 threads`）。
+   `896×4864` 从 51 → **144 GB/s**，其余两个形状 +4%/+29%。
+4. **prefill 按 6 token 分块**（`k_linear_t6win`，带 `n_tok`/`tok0` 的滑动窗口版）。
+   通用多 token kernel 是"每 (行块, token) 一个 workgroup"，117 token 的 prompt 会
+   把整套权重读 **117 遍**；它跑在 ~150 GB/s（带宽没问题，是冗余），分块后降到 20 遍。
+   守卫版会让 DiT 从 3.45 退到 4.03 s，所以**分成两个 kernel**：DiT 用无守卫版，
+   prefill 用带守卫版。
+
+**同热背靠背（长句 5.00 s 音频 / 63 latents，t=117）**
+
+| 阶段 | 本轮开始 | 现在 |
+|---|---:|---:|
+| prefill | 0.61 s | **0.46 s** |
+| DiT | 4.29 s（旧标量 8.6 s） | **3.21–3.59 s** |
+| LLM + agg | 1.82 s | **1.68–1.85 s** |
+| 解码环 | 6.42 s | **5.35–5.91 s** |
+
+`MING_T6=base`（旧标量 kernel）在同一时刻是 11.46 s，即 DiT 单阶段 **2.1×**。
+
+收尾确认（同一二进制连续 3 次，机器已热透）：**5.73 / 5.51 / 5.90 s**
+（prefill 0.46–0.47 s，DiT 3.31–3.59 s，LLM+agg 1.72–1.84 s）。对照 Python
+CUDA Graph 同文本 5.11 s：**RTF 1.10–1.18 vs 1.008，差 5–15%**。
+
+**验收**
+
+- `cargo test --release -- --test-threads=1`：**64/64**，165 s。
+- 压力集（`tools/stress_compare.py`）比文档基线**全面变好**：S6 mel 0.885 → 0.923、
+  S8 mel 0.970 → 0.99991、S3 rel 4.7e-1 → 2.9e-2。长单段用例的提升来自 prefill 分块
+  改变了 f32 累加分组。
+
+**下一步（按收益排序）**
+
+1. **split-K**：DiT 仍只有 32–128 个 workgroup。t=117 的 prefill 用同族 kernel、
+   在 13104 个 workgroup 下跑到 150 GB/s，而 t=6 的 128 个 workgroup 只有 47 GB/s
+   ——**并行度就是那个 3× 的缺口**。按 K 切 2–4 份再融合 bias，是现在最明确的一条。
+2. **prefill 再用真 GEMM 收一次**：分块把冗余从 117 降到 20，但每个分块的 workgroup
+   数仍然偏低（28–152），实际只有 ~32 GB/s；要做到 150 GB/s + 1 遍读，需要
+   48–128 token × 64 行的 tile（现有 `GEMM_PREFILL_48X64` 实测无效，得重写）。
+3. **合并 dispatch**（gelu 融进 ff_in epilogue、add 融进 rms）：每 block 省 2 次，
+   每次 6-token 前向约 16 次。
+
 ### 0.5.6 关于"能不能到 0.88"
 
 上一轮"DiT 屋顶 34–40 GB/s、0.88 到不了"的结论早已作废。本轮 t=6 已实测
-**40–47 GB/s**，DiT 2.46 s，已经快过文档里 Python 的 3.34 s。剩下的是整句
-3.72 s 对 2.8 s（RTF 0.88）左右，差距主要在调度/小 workgroup 占用，而不是算术量。
-**0.88 仍未达成，但已从"看不到路"变成具体的 split-K 和调度优化问题。**
+**45–48 GB/s**（展开后），DiT 3.2–3.6 s，已经和文档里 Python 的 2.92 s 同量级。
+**0.88 仍未达成，但差距已经从"看不到路"变成具体的 split-K 并行度问题。**
 
 ## 1. 现状
 
@@ -219,9 +292,12 @@ matmul 融合 residual/gelu epilogue。CUDA Graph 在 wgpu 没有等价物，不
 | `MING_NOISE_GOLDEN=<dir>` | 注入金标 torch.randn 抽样（`goldens/m5/` 或 `goldens/m5_params/<case>/`），用于逐样本对拍 |
 | `MING_DUMP_IDS=<file>` | 把首条分片的 token id 写盘，用于和参考的 `build_input_ids` 比 |
 | `MING_MAX_PENDING=<n>` | 一次提交的 dispatch 上限（默认 2048） |
-| `MING_T6=base\|spec\|v2\|v3\|v4\|v5\|hybrid` | 覆盖 DiT 六 token 线性层（默认 hybrid：K≤2048 用 v4 的 8 lanes，K>2048 用 v2） |
-| `MING_T1=base` | 关闭单 token 小投影的半 warp 归约 |
+| `MING_T6=base\|spec\|v2\|v3\|v4\|v5` | 回退到旧的标量六 token kernel（A/B 用） |
+| `MING_T6=v8\|v9\|v10\|v11\|v12\|v13\|v14` | 向量化 kernel 的行宽/行数/展开组合，默认 `v12`（8 lanes × 2 行 × 展开 2） |
+| `MING_T1=base\|half` | 回退单 token 路径（默认是向量化 2 行版；`half` 是旧的半 warp 版） |
+| `MING_T1=v1\|v2\|v3\|v4` | 单 token 变体，(8,64,1)/(8,128,1)/(8,128,2)/(16,128,1) |
 | `MING_PREFILL=base` | 关闭 prefill 的 48×64 tile，回到 token 并行 GEMV |
+| `MING_LM_PREFILL_PROFILE=1` | 打印 prefill 单层分段耗时（只打印一次） |
 | `MING_SCRATCH=0` | 关闭 DiT 持久 scratch/缓存快路径（A/B 用） |
 | `MING_LM_FAST=0` | 关闭 LLM 持久 scratch/缓存快路径（A/B 用） |
 | `MING_BIND_CACHE=0` | 关闭 bind group 缓存（定位数值问题用） |
@@ -514,27 +590,34 @@ GELU 用 erf 而不是 tanh 那件事仍然成立（每元素差 1e-3，是真�
 同一份二进制、同一句话，一小时前 DiT 是 4.84 s，连跑数小时压测后变成 5.65 s（两轮复测一致）。P104-100 是被动散热，长时间满载会降频。
 **所以任何 kernel A/B 都必须背靠背进行**（同一分钟内交替跑两个版本，或至少用 `linear_bandwidth` 这种短基准做相对比较），不要拿隔了半小时的绝对数字比。
 
-### 4.5 性能（release，P104-100，A1_bare：40 步 / 3.2 s 音频）
+### 4.5 性能（release，P104-100）
 
-| 阶段 | 耗时 | 占比 |
-|---|---|---|
-| prefill（43 token） | 0.38 s | 10% |
-| **DiT + CFM（10 次合批前向 × 40 步）** | **2.46 s** | **66%** |
-| LLM 解码 + aggregator | 0.89 s | 24% |
-| 合计（解码环） | 3.72 s | **RTF 1.16** |
-| 模型加载 + VAE 解码 | ~5.7 s | 一次性 |
+> **4.5 的表是历史快照，只保留阶段结构。最新数字见 0.5.8**（长句 63 latents：
+> prefill 0.46 s / DiT 3.2–3.6 s / LLM+agg 1.7–1.9 s，整句 5.35–5.91 s）。
+
+| 阶段 | 耗时（历史） |
+|---|---|
+| prefill | 0.38 s |
+| DiT + CFM | 2.46 s |
+| LLM 解码 + aggregator | 0.89 s |
+| 合计（解码环） | 3.72 s |
+| 模型加载 + VAE 解码 | ~5.7 s（一次性） |
 
 ## 5. 未完成与已知问题
 
-### P0：RTF ~1.0–1.2（随热状态）→ 目标 < 0.88（唯一未达成的验收项）
+### P0：RTF 1.07–1.18（随热状态）→ 目标 < 0.88（唯一未达成的验收项）
 
 **详细交接见 0.5 节**（时间账 / 已确认事实 / 成功与排除方案 / 剩余三条 / 工具门限）。
+**先读 0.5.8**：它推翻了"瓶颈是 dispatch 数"这个判断。
 
 进度：pred/null 合批（2.51 → 2.03）→ t=6 配对激活 + lanes/行（1.74 → 1.16）→
-持久 scratch + bind cache（同热再降 19%，见 0.5.7）。Rust 已快过 Python eager，
-但 Python CUDA Graph 仍领先约 1.3–1.5×。下一步必须减少 dispatch 数：qkv 三合一、
-rope+KV+attention 合一、matmul 融 residual/gelu。split-K、RMS 融合和继续调 lanes
-的收益都小于 dispatch 合并。
+持久 scratch + bind cache（再降 19%，0.5.7）→ 全向量化 + 2 行复用 + K 展开
+（DiT 4.29 → 3.2–3.6 s，0.5.8）→ prefill 按 6 token 分块（0.61 → 0.46 s）。
+
+长句整句已到 **5.35–5.91 s**（5.00 s 音频），Python CUDA Graph 是 **5.11 s**，
+差 5–15%。下一步**不是**合并 dispatch，而是 **split-K**：DiT 每层只有 32–128 个
+workgroup，而 prefill 里同族 kernel 在 13104 个 workgroup 下跑到 150 GB/s
+（t=6 只有 47 GB/s）——并行度就是那个 3× 缺口。
 
 ### P1：轨迹分岔（已收口：6 例连时长都错 → 10 例"只在后段"）
 
