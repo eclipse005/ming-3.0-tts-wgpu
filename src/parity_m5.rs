@@ -294,3 +294,73 @@ mod m2_pair_tests {
         assert!(ec < 1e-6 && en < 1e-6, "batched branch drifted: rel {ec:.3e} / {en:.3e}");
     }
 }
+
+#[cfg(test)]
+mod gemm_bench {
+    use super::*;
+    use crate::gpu::Gpu;
+    use crate::nn::kernel;
+    use crate::ops::{Lin, Ops};
+    use crate::shaders;
+
+    fn lin_of(gpu: &Gpu, rows: usize, inf: usize) -> Lin {
+        // deterministic pseudo-random bf16 weights, packed two per u32
+        let words = rows * inf / 2;
+        let mut w = Vec::with_capacity(words);
+        let mut state: u32 = 0x1234_5678;
+        for _ in 0..words {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            // keep both bf16 halves finite: exp 0x7e, random mantissa byte
+            let lo = (state & 0xFF) | 0x3F00;
+            let hi = ((state >> 16) & 0xFF) | 0x3F00;
+            w.push(lo | (hi << 16));
+        }
+        let b = vec![0f32; rows];
+        Lin {
+            w: gpu.upload_u32(&w, "bench.w"),
+            b: gpu.upload_f32(&b, "bench.b"),
+            rows,
+            in_features: inf,
+        }
+    }
+
+    /// What the linear kernel actually sustains, against the ~268 GB/s that the
+    /// qwen3-asr port measured on this same card for the same kind of GEMV.
+    #[test]
+    fn linear_bandwidth() {
+        let gpu = Gpu::new().unwrap();
+        let ops = Ops::new(gpu.clone());
+        for (rows, inf, tok) in [
+            (4096usize, 1024usize, 6usize),
+            (1024, 4096, 6),
+            (1024, 1024, 6),
+            (896, 896, 1),
+            (4864, 896, 1),
+            (896, 4864, 1),
+        ] {
+            let lin = lin_of(&gpu, rows, inf);
+            let x = gpu.upload_f32(&vec![0.5f32; tok * inf], "bench.x");
+            for _ in 0..3 {
+                let y = ops.linear(&lin, &x, tok);
+                std::hint::black_box(&y);
+            }
+            gpu.flush();
+            let iters = 20;
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                let y = ops.linear(&lin, &x, tok);
+                std::hint::black_box(&y);
+            }
+            gpu.flush();
+            let dt = t0.elapsed().as_secs_f64() / iters as f64;
+            let mb = (rows * inf * 2) as f64 / 1e6;
+            println!(
+                "  {rows:5}x{inf:<5} t={tok} : {:6.1} us, {:.0} GB/s  ({mb:.1} MB)",
+                dt * 1e6,
+                mb / 1e3 / dt
+            );
+        }
+        let _ = kernel;
+        let _ = shaders::PACK3;
+    }
+}
