@@ -417,12 +417,22 @@ ormalize_text_kit；--no_text_normalization 行为不变。
 2026年11月1日→二零二六年十一月一日、增长12.5%→增长百分之十二点五、
 3.5 万元→三点五万元。
 
+**参考环境已可跑 TN**：conda create -n tn_ref -c conda-forge python=3.12 pynini=2.1.7
+（conda-forge 有 win-64 构建；原 videolingo env 是 py3.10，PyPI 没有对应 wheel，源码编译会
+因为 GCC 风格 flag 传给 MSVC 失败）。用 	ools/_tn_goldens.py 生成 30 条中文金标
+（goldens/tn_cases.json），cargo test --ignored matches_reference_goldens 对比：
+
+- **18/30 已经一致**（数字、日期、时间、百万/万、百分比、telephone…）；
+- **12/30 不一致，全部是需要 	alker_re 规则层的形态**：带空格的「第 12 名」「用量 10GB」
+  「共 3 人」、多级版本号「3.2.1」、序列号「GPT-4」「A-1024」、区间「5-8个」「3~5天」、
+  带空格的「3.5 万元」等。其中多数在 Rust 侧直接 compose 失败（输出空串），因为参考在进
+  FST 前先用正则把它们改写成 FST 能接受的形态。
+
 **还没移植**：	alker_re 规则层（	alker_re.json + 
-e_utils/*：金额/度量/日期/时间/
-百分比/IP/版本/电话/专有名词/序列号重写）与 
-umber_en.py。影响面：纯数字/日期/度量已经正确，
-但**中文里夹的字母数字串**（如 GPT-4）、专有名词映射和部分金额/序列号写法与参考不同。
-本机没有 pynini（参考实现自己跑不了 TN），所以这块只能对照 Python 源码与 FST 语义验证。
+e_utils/* 共 16 个类：金额/度量/
+日期/时间/百分比/IP/版本/电话/专有名词/序列号重写）与 
+umber_en.py（英文分支，依赖
+inflect）。金标测试已就位，规则层移植完后应变成 30/30。
 
 ## 1. 现状
 
