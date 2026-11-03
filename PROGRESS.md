@@ -419,22 +419,28 @@ ormalize_text_kit；--no_text_normalization 行为不变。
 
 **参考环境已可跑 TN**：conda create -n tn_ref -c conda-forge python=3.12 pynini=2.1.7
 （conda-forge 有 win-64 构建；原 videolingo env 是 py3.10，PyPI 没有对应 wheel，源码编译会
-因为 GCC 风格 flag 传给 MSVC 失败）。用 	ools/_tn_goldens.py 生成 30 条中文金标
-（goldens/tn_cases.json），cargo test --ignored matches_reference_goldens 对比：
+因为 GCC 风格 flag 传给 MSVC 失败）。	ools/_tn_goldens.py 生成中文金标
+（goldens/tn_cases.json，89 条），cargo test --release matches_reference_goldens 对比
+**89/89 一致**。
 
-- **18/30 已经一致**（数字、日期、时间、百万/万、百分比、telephone…）；
-- **12/30 不一致，全部是需要 	alker_re 规则层的形态**：带空格的「第 12 名」「用量 10GB」
-  「共 3 人」、多级版本号「3.2.1」、序列号「GPT-4」「A-1024」、区间「5-8个」「3~5天」、
-  带空格的「3.5 万元」等。其中多数在 Rust 侧直接 compose 失败（输出空串），因为参考在进
-  FST 前先用正则把它们改写成 FST 能接受的形态。
+规则层已完整移植到 src/tn/re.rs（对照 	alker_re.py + 
+e_utils/* 逐条）：
 
-**还没移植**：	alker_re 规则层（	alker_re.json + 
-e_utils/* 共 16 个类：金额/度量/
-日期/时间/百分比/IP/版本/电话/专有名词/序列号重写）与 
-umber_en.py（英文分支，依赖
-inflect）。金标测试已就位，规则层移植完后应变成 30/30。
+- 配置：	alker_re.json（money/measure_before/measure_after/serial_before/serial_after/
+  char_map0/proper_noun），随 FST 一起放 	n_data/；
+- 分词与合批：REChar/REDigit/REPunc 三类聚合、字符间隔 ≤3 的成组规则、SN 区段识别
+  （det 里的关键字与交替模式判定）；
+- 形状评分 8 条：date/decimal/time/version/ip/frac/phone_dash/formula，按分数取最高、处理
+  -/~ 区间的拆分与「至」；
+- 单位绑定：money/measure 的前后缀、percent、serial、order，以及「等于」特例；
+- 标点折叠：merge_punc_measure / merge_punc_range（至/负/大约）；
+- 数字读法：d4_to_chi / 	o_string / 	o_string_rm0 / 	o_string_direct / 	o_string_yao。
 
-## 1. 现状
+**还没移植**：
+umber_en.py（英文分支，依赖 inflect 的 number_to_words）。中文分支已与
+参考逐字一致；纯英文文本目前只经过 en FST（数字会逐位读，和参考的 
+ormalize_numbers
+不同）。## 1. 现状
 
 | 验收项 | 状态 | 证据 |
 |---|---|---|

@@ -11,6 +11,8 @@ import json
 import re
 import sys
 
+sys.stdout.reconfigure(errors="replace")
+
 sys.path.insert(0, "D:/Ming-3.0-tts")
 
 from frontend.talker_tn.talker_tn import TalkerTN  # noqa: E402
@@ -60,6 +62,76 @@ CASES = [
     "12:00",
     "1.5倍",
     "第1季度",
+    # --- extended: units, money, phone, IP, time, formulas, serials ---
+    "温度是-5.5度",
+    "他跑了5.5公里",
+    "重量约3.2kg",
+    "文件大小是10.5MB",
+    "房租每月3000元",
+    "这件衣服199块钱",
+    "工资是5000美元",
+    "花了¥88",
+    "价格上涨了3.5%",
+    "下降了0.5个百分点",
+    "电话是010-12345678",
+    "手机13800138000",
+    "客服400-800-1234",
+    "服务器10.0.0.1",
+    "版本号v1.2.3",
+    "第1.2.3版",
+    "上午9:30开会",
+    "下午3:45见",
+    "晚上8点",
+    "12:00整",
+    "2026年",
+    "2026-11-01的会议",
+    "11月1号",
+    "3/4的苹果",
+    "5/8的人",
+    "1+2=3",
+    "3*4=12",
+    "10-2=8",
+    "序列号A1B2C3",
+    "SN:12345678",
+    "订单号AB-1234",
+    "1. 第一项",
+    "2. 第二项",
+    "这是第3个",
+    "共12人参加",
+    "增长了两倍",
+    "翻了三番",
+]
+
+EXTRA = [
+    "温度是-5.5度",
+    "他跑了5.5公里",
+    "重量约3.2kg",
+    "文件大小是10.5MB",
+    "房租每月3000元",
+    "这件衣服199块钱",
+    "工资是5000美元",
+    "花了¥88",
+    "价格上涨了3.5%",
+    "下降了0.5个百分点",
+    "电话是010-12345678",
+    "客服400-800-1234",
+    "服务器10.0.0.1",
+    "版本号v1.2.3",
+    "上午9:30开会",
+    "下午3:45见",
+    "晚上8点",
+    "12:00整",
+    "2026-11-01的会议",
+    "11月1号",
+    "3/4的苹果",
+    "1+2=3",
+    "3*4=12",
+    "10-2=8",
+    "序列号A1B2C3",
+    "订单号AB-1234",
+    "1. 第一项",
+    "这是第3个",
+    "共12人参加",
 ]
 
 
@@ -75,7 +147,7 @@ def normalize_fragment(tn: TalkerTN, text: str) -> str:
 
 def main() -> None:
     tn = TalkerTN()
-    rows = [{"input": c, "expected": normalize_fragment(tn, c)} for c in CASES if is_chinese(c)]
+    rows = [{"input": c, "expected": normalize_fragment(tn, c)} for c in CASES + EXTRA if is_chinese(c)]
     out = "D:/Ming-3.0-tts/wgpu/goldens/tn_cases.json"
     with open(out, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=1)
