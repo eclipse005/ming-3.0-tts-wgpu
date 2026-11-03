@@ -383,7 +383,7 @@ STYLE 多分片的首片重条件也已补齐（第 0 片生成后重新过 CAMP
 args=+） | ✅ | ✅ | ✅ |
 | STYLE 多片首片重条件 | ✅ | ✅ | ✅ |
 | cfg / sigma / temperature / max_decode_steps / no_trim_silence / seed | ✅ | ✅ | ✅ |
-| 文本规范化（pynini FST） | ✅（本机缺 pynini 跑不了） | ❌ 仅 normalize_text_kit | ❌ 同左 |
+| 文本规范化（pynini FST） | ✅（本机缺 pynini 跑不了） | ✅ FST 链已移植，缺 TalkerRE 规则层 | ✅ 同左（共用 prepare_text） |
 | --spk_emb_path（.pt） | ✅ | ❌ 明确报错 | ❌ 同一条报错 |
 | 流式推理 | 库里有，infer.py 未暴露 | ❌ | ❌ |
 
@@ -394,6 +394,35 @@ A2 1.0000/6.3e-4/1.00000、G2（STYLE 2 片）1.0000/0.321/0.99733。
 （不同测试、不同次，单测单跑 3/3 通过；核显上连跑稳定）。这是这张改造矿卡在持续负载下
 掉设备，不是代码回归；CI 可用 MING_DEVICE=igpu。MING_IN_FLIGHT 默认已降到 4（更深队列
 只快 ~2%）。
+
+### 0.12 文本规范化（TalkerTN）移植
+
+参考实现的 TN 是「pynini FST + 正则规则层」：	alker_pre_processor → （含中日韩）
+	alker_re + 数字连字符 → zh_tn_tagger → TokenParser.reorder → zh_tn_verbalizer；
+纯英文走 n_tn 那一对。**FST 是随仓库发布的 OpenFST 二进制**，所以移植不需要 pynini：
+
+- src/tn.rs：用 
+ustfst 读同一批 .fst（	n_data/ 里 8.3 MB，复制自
+  rontend/talker_tn，可 MING_TN_DIR 覆盖），把输入串展开成字节 FST、compose、
+  shortest_path(nshortest=1, unique)，再按输出标签还原字符串；
+- TokenParser 1:1 移植（date/fraction/measure/money/time 的键序重排）；
+- 	alker_pre_processor 9 条正则 + 表情/符号过滤；
+- 数字连字符 (?<=\d)-(?=\d) → ，；
+- 中/英分支选择（[一-鿿]）与 prepare_text 接线：TN 开（默认）时先过 TalkerTN，
+  再走 
+ormalize_text_kit；--no_text_normalization 行为不变。
+
+实测（cargo test reads_and_normalizes）：今天天气3度→今天天气三度、
+价格350元→价格三百五十元、下午2点30分→下午二点三十分、
+2026年11月1日→二零二六年十一月一日、增长12.5%→增长百分之十二点五、
+3.5 万元→三点五万元。
+
+**还没移植**：	alker_re 规则层（	alker_re.json + 
+e_utils/*：金额/度量/日期/时间/
+百分比/IP/版本/电话/专有名词/序列号重写）与 
+umber_en.py。影响面：纯数字/日期/度量已经正确，
+但**中文里夹的字母数字串**（如 GPT-4）、专有名词映射和部分金额/序列号写法与参考不同。
+本机没有 pynini（参考实现自己跑不了 TN），所以这块只能对照 Python 源码与 FST 语义验证。
 
 ## 1. 现状
 

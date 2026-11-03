@@ -64,12 +64,17 @@ pub(crate) fn prepare_text(tok: &Tok, req: &tasks::SynthRequest, a: &Args) -> Re
     };
     let mut fragments = text::cut_text_by_semantic_length(&base, a.max_length);
     if !a.no_text_normalization && !multilingual {
-        // The reference runs a pynini FST normaliser for non-multilingual
-        // text. We only implement the pynini-free normalisation kit, which
-        // is enough for text without digits/symbols.
+        // The reference runs TalkerTN (pynini FSTs + regex glue) and then the
+        // pynini-free normalisation kit. crate::tn is a port of that chain; its
+        // FSTs are the reference's own compiled automata.
         fragments = fragments
             .iter()
-            .map(|f| text::normalize_text_kit(f))
+            .map(|f| -> Result<String> {
+                let normalized = tn_normalize(f)?;
+                Ok(text::normalize_text_kit(&normalized))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
             .filter(|f| !f.trim().is_empty())
             .collect();
     } else {
@@ -79,6 +84,22 @@ pub(crate) fn prepare_text(tok: &Tok, req: &tasks::SynthRequest, a: &Args) -> Re
         bail!("text produced no synthesizable fragments");
     }
     Ok(fragments)
+}
+
+/// Lazily loaded TalkerTN (the FSTs are ~8 MB; load once per process).
+fn tn_normalize(text_in: &str) -> Result<String> {
+    use std::sync::OnceLock;
+    static TN: OnceLock<std::result::Result<crate::tn::TalkerTn, String>> = OnceLock::new();
+    let tn = TN.get_or_init(|| {
+        crate::tn::TalkerTn::load(&crate::tn::default_dir()).map_err(|e| e.to_string())
+    });
+    match tn {
+        Ok(tn) => tn.normalize(text_in),
+        Err(e) => anyhow::bail!(
+            "text normalisation needs the FST data ({e}); pass --no_text_normalization \
+             or set MING_TN_DIR to a directory holding *_tagger.fst / *_verbalizer.fst"
+        ),
+    }
 }
 
 /// Port of tts_tasks.preserve_multilingual_text: explicit non-zh/en languages

@@ -27,6 +27,7 @@ mod synth;
 mod spk;
 mod tasks;
 mod text;
+mod tn;
 mod tok;
 mod vae;
 mod vae_dec;

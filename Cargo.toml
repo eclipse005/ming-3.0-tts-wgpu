@@ -26,6 +26,8 @@ rayon = "1.10"
 # time, so the build never downloads a binary. api-23 matches the installed
 # ONNX Runtime 1.23 (ORT 1.x exposes API version x).
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-23"] }
+rustfst = "1.3.1"
+fancy-regex = "0.20.0"
 
 [profile.release]
 opt-level = 3
