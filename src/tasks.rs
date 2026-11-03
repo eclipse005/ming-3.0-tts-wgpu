@@ -548,10 +548,8 @@ pub fn build_task_generation_kwargs_ext(
         (language_id, target_language)
     };
 
-    if language_id.is_some() && target_language.is_some() {
-        let left = py_strip(language_id.unwrap()).to_lowercase();
-        let right = py_strip(target_language.unwrap()).to_lowercase();
-        if left != right {
+    if let (Some(left), Some(right)) = (&language_id, &target_language) {
+        if py_strip(left).to_lowercase() != py_strip(right).to_lowercase() {
             bail!("language_id and target_language must not conflict");
         }
     }
@@ -572,8 +570,8 @@ pub fn build_task_generation_kwargs_ext(
         bail!("use_spk_emb and use_zero_spk_emb cannot both be true");
     }
     if use_spk_emb
-        && !(prompt_wav_path.map_or(false, |path| !path.is_empty())
-            || spk_emb_path.map_or(false, |path| !path.is_empty()))
+        && !(prompt_wav_path.is_some_and(|path| !path.is_empty())
+            || spk_emb_path.is_some_and(|path| !path.is_empty()))
     {
         bail!("use_spk_emb requires a prompt wav or a speaker embedding");
     }

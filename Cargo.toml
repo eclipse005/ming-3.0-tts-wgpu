@@ -10,7 +10,6 @@ bytemuck = { version = "1", features = ["derive"] }
 memmap2 = "0.9"
 safetensors = "0.4"
 clap = { version = "4", features = ["derive"] }
-thiserror = "2"
 anyhow = "1"
 rustfft = "6"
 hound = "3"

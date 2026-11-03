@@ -12,7 +12,6 @@
 //! which the reference applies before the FSTs for Chinese / non-Chinese text
 //! respectively. See PROGRESS 0.12.
 
-#![allow(dead_code)]
 
 use anyhow::{Context, Result};
 use rustfst::algorithms::compose::compose;
@@ -317,8 +316,8 @@ fn digit_hyphen(text: &str) -> String {
     out
 }
 
-/// Where the shipped FSTs live: 	n_data/ next to the crate (copied from the
-/// reference's rontend/talker_tn), overridable with MING_TN_DIR.
+/// Where the shipped FSTs live: `tn_data/` next to the crate (copied from the
+/// reference's `frontend/talker_tn`), overridable with `MING_TN_DIR`.
 pub fn default_dir() -> std::path::PathBuf {
     std::env::var("MING_TN_DIR")
         .map(std::path::PathBuf::from)

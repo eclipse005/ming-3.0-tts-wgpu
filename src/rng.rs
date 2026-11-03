@@ -6,11 +6,12 @@
 //!
 //! Reverse-engineered from the reference's own draws (see PROGRESS.md):
 //! CUDA torch.randn is curand's Philox4x32-10 with
-//!   * key          = (seed & 0xffffffff, seed >> 32)
-//!   * counter.x    = the draw index (one per torch.randn call, +1 each)
-//!   * counter.z    = the element index inside that call
-//!   * value        = box_muller(uniform(r0), uniform(r1)).sin
-//! with curand_uniform(x) = x * 2^-32 + 2^-33.
+//! * key: `(seed & 0xffffffff, seed >> 32)`
+//! * counter.x: the draw index (one per torch.randn call, +1 each)
+//! * counter.z: the element index inside that call
+//! * value: `box_muller(uniform(r0), uniform(r1)).sin`
+//!
+//! with `curand_uniform(x) = x * 2^-32 + 2^-33`.
 //! Validated against 3,680 recorded values: max abs error 9.5e-7 (torch uses
 //! the fast __sincosf intrinsic, we use the exact sin).
 

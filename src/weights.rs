@@ -6,7 +6,6 @@
 
 // Parts of this module are exercised only by the parity tests (they read
 // goldens) or kept as public API; the release binary does not call them.
-#![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
@@ -43,16 +42,12 @@ pub struct TensorEntry {
 }
 
 impl TensorEntry {
-    pub fn elems(&self) -> usize {
-        self.shape.iter().product::<usize>().max(1)
-    }
-
     /// bf16 -> f32 lossless widen; f32 passthrough.
     pub fn to_f32(&self) -> Result<Vec<f32>> {
         match self.dtype {
             DType::F32 => Ok(self
                 .data
-                .chunks_exact(4)
+                .as_chunks::<4>().0.iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect()),
             DType::Bf16 => Ok(self.bf16_iter().collect()),
@@ -62,7 +57,7 @@ impl TensorEntry {
     }
 
     pub fn bf16_iter(&self) -> impl Iterator<Item = f32> + '_ {
-        self.data.chunks_exact(2).map(|c| {
+        self.data.as_chunks::<2>().0.iter().map(|c| {
             let bits = (c[0] as u32) | ((c[1] as u32) << 8);
             f32::from_bits(bits << 16)
         })
@@ -74,23 +69,20 @@ impl TensorEntry {
         if self.dtype != DType::Bf16 {
             bail!("packed u32 accessor requires bf16 weights");
         }
-        let mut out = Vec::with_capacity(self.elems() / 2 + 1);
-        let mut chunks = self.data.chunks_exact(2);
-        loop {
-            let lo = chunks.next();
-            let hi = chunks.next();
-            let l = match lo {
-                Some(c) => (c[0] as u32) | ((c[1] as u32) << 8),
-                None => break,
-            };
-            let h = match hi {
-                Some(c) => (c[0] as u32) | ((c[1] as u32) << 8),
-                None => 0,
-            };
-            out.push(l | (h << 16));
-            if hi.is_none() {
-                break;
-            }
+        let (words, rem) = self.data.as_chunks::<4>();
+        let mut out = Vec::with_capacity(words.len() + usize::from(!rem.is_empty()));
+        for c in words {
+            out.push(
+                (c[0] as u32)
+                    | ((c[1] as u32) << 8)
+                    | ((c[2] as u32) << 16)
+                    | ((c[3] as u32) << 24),
+            );
+        }
+        match rem {
+            [] => {}
+            [lo, hi] => out.push((*lo as u32) | ((*hi as u32) << 8)),
+            _ => bail!("bf16 data length {} is not a multiple of 2", self.data.len()),
         }
         Ok(out)
     }
@@ -126,9 +118,13 @@ impl Weights {
             .with_context(|| format!("missing tensor {name}"))
     }
 
+    #[cfg(test)]
+
     pub fn contains(&self, name: &str) -> bool {
         self.map.contains_key(name)
     }
+
+    #[cfg(test)]
 
     pub fn names_matching(&self, pat: &str) -> Vec<&String> {
         let mut v: Vec<&String> = self

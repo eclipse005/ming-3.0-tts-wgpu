@@ -7,7 +7,6 @@
 //! (`tools/_en_goldens.py`), so the wording is checked value by value rather
 //! than by rule-of-thumb.
 
-#![allow(dead_code)]
 
 use anyhow::{Context, Result};
 use fancy_regex::Regex;
@@ -134,8 +133,8 @@ pub fn ordinal(word: &str) -> String {
         "millionth"
     } else if last == "billion" {
         "billionth"
-    } else if last.ends_with('y') {
-        return format!("{head}{}ieth", &last[..last.len() - 1]);
+    } else if let Some(stem) = last.strip_suffix('y') {
+        return format!("{head}{stem}ieth");
     } else {
         return format!("{head}{last}th");
     };
@@ -294,7 +293,7 @@ fn expand_unit(num_str: &str, unit: &str) -> String {
     let Some(words) = decimal_words(clean) else {
         return format!(" {num_str} {unit} ");
     };
-    let unit_word = unit_mapping(&unit.to_lowercase()).unwrap_or_else(|| {
+    let unit_word = unit_mapping(&unit.to_lowercase()).unwrap_or({
         // The caller lower-cases; unknown units pass through in lower case.
         ""
     });

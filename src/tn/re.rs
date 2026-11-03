@@ -9,7 +9,6 @@
 //! token for token; the rules are data (talker_re.json), the scoring and the
 //! folding are the code below.
 
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -187,6 +186,12 @@ pub enum Tok {
     },
 }
 
+impl std::fmt::Display for Tok {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.render())
+    }
+}
+
 impl Tok {
     fn char(s: impl Into<String>) -> Self {
         Tok::Char(s.into())
@@ -239,20 +244,8 @@ impl Tok {
         to_string_rm0(self.digit_txt().unwrap_or(""))
     }
 
-    fn to_string_yao(&self) -> String {
-        match self {
-            Tok::Digit(s) => to_string_yao(s),
-            Tok::Ip(parts) => parts
-                .iter()
-                .map(|p| to_string_yao(p.txt()))
-                .collect::<Vec<_>>()
-                .join("点"),
-            Tok::PhoneDash(parts) => parts.iter().map(|p| to_string_yao(p.txt())).collect(),
-            _ => self.to_string(),
-        }
-    }
 
-    pub fn to_string(&self) -> String {
+    fn render(&self) -> String {
         match self {
             Tok::Char(s) | Tok::Punc(s) => s.clone(),
             Tok::Digit(s) => to_string_number(s),
@@ -621,9 +614,11 @@ fn score(class: ScoreClass, stack: &[Elem], idx: usize) -> i32 {
         }
         ScoreClass::Version => {
             if g.len() == 5 && g[1].txt() == "." && g[3].txt() == "." {
-                if idx > 0 && (prev_txt.ends_with('v') || prev_txt.ends_with('V')) {
-                    90
-                } else if idx > 0 && prev_txt.contains("版本") {
+                if idx > 0
+                    && (prev_txt.ends_with('v')
+                        || prev_txt.ends_with('V')
+                        || prev_txt.contains("版本"))
+                {
                     90
                 } else {
                     50
@@ -644,11 +639,10 @@ fn score(class: ScoreClass, stack: &[Elem], idx: usize) -> i32 {
             }
         }
         ScoreClass::Frac => {
-            if g.len() == 3 && g[1].txt() == "/" {
-                50
-            } else if g.len() == 5
-                && ["-", "~", "～"].contains(&g[1].txt())
-                && g[3].txt() == "/"
+            if (g.len() == 3 && g[1].txt() == "/")
+                || (g.len() == 5
+                    && ["-", "~", "～"].contains(&g[1].txt())
+                    && g[3].txt() == "/")
             {
                 50
             } else {
@@ -656,16 +650,14 @@ fn score(class: ScoreClass, stack: &[Elem], idx: usize) -> i32 {
             }
         }
         ScoreClass::PhoneDash => {
-            if g.len() == 3
+            if (g.len() == 3
                 && g[0].txt().len() == 3
                 && g[1].txt() == "-"
-                && g[2].txt().len() == 8
-            {
-                80
-            } else if g.len() == 3
-                && g[0].txt().len() == 4
-                && g[1].txt() == "-"
-                && [7, 8].contains(&g[2].txt().len())
+                && g[2].txt().len() == 8)
+                || (g.len() == 3
+                    && g[0].txt().len() == 4
+                    && g[1].txt() == "-"
+                    && [7, 8].contains(&g[2].txt().len()))
             {
                 80
             } else if g.len() == 5
@@ -689,7 +681,7 @@ fn score(class: ScoreClass, stack: &[Elem], idx: usize) -> i32 {
             if ops.iter().all(|o| *o == "-") {
                 return -1;
             }
-            if ops.iter().all(|o| operator(o) != "") {
+            if ops.iter().all(|o| !operator(o).is_empty()) {
                 if ops.contains(&"=") {
                     85
                 } else {
@@ -702,7 +694,7 @@ fn score(class: ScoreClass, stack: &[Elem], idx: usize) -> i32 {
     }
 }
 
-fn deal(class: ScoreClass, stack: &mut Vec<Elem>, idx: usize) -> usize {
+fn deal(class: ScoreClass, stack: &mut [Elem], idx: usize) -> usize {
     match class {
         ScoreClass::Date => {
             if let Elem::Group(g) = &stack[idx] {
@@ -801,7 +793,7 @@ fn deal(class: ScoreClass, stack: &mut Vec<Elem>, idx: usize) -> usize {
 // ---------------------------------------------------------------------------
 
 fn try_digit_before(
-    stack: &mut Vec<Elem>,
+    stack: &mut [Elem],
     idx: usize,
     dict: &HashMap<String, String>,
     lens: &[usize],
@@ -849,7 +841,7 @@ fn try_digit_before(
 }
 
 fn try_digit_after(
-    stack: &mut Vec<Elem>,
+    stack: &mut [Elem],
     idx: usize,
     dict: &HashMap<String, String>,
     lens: &[usize],
@@ -981,7 +973,7 @@ fn merge_punc_measure(stack: &mut Vec<Elem>, idx: usize) -> usize {
     idx + 1
 }
 
-fn merge_punc_range(stack: &mut Vec<Elem>, idx: usize) -> usize {
+fn merge_punc_range(stack: &mut [Elem], idx: usize) -> usize {
     if idx >= 2 && idx - 1 < stack.len() && elem_name(&stack[idx - 1]) == "punc" {
         let p = elem_txt(&stack[idx - 1]).to_string();
         if ["-", "~", "～"].contains(&p.as_str()) && elem_name(&stack[idx - 2]) == elem_name(&stack[idx]) {

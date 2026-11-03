@@ -13,8 +13,8 @@ fn model_dir() -> std::path::PathBuf {
 }
 
 /// One shared kernel set per test.
-fn ops_for(gpu: &crate::gpu::Gpu) -> std::sync::Arc<crate::ops::Ops> {
-    std::sync::Arc::new(crate::ops::Ops::new(gpu.clone()))
+fn ops_for(gpu: &crate::gpu::Gpu) -> std::rc::Rc<crate::ops::Ops> {
+    std::rc::Rc::new(crate::ops::Ops::new(gpu.clone()))
 }
 
 #[cfg(test)]

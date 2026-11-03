@@ -21,7 +21,6 @@
 
 // Parts of this module are exercised only by the parity tests (they read
 // goldens) or kept as public API; the release binary does not call them.
-#![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
@@ -147,9 +146,9 @@ pub fn fft_input(wav: &[f32]) -> (Vec<f32>, usize) {
         // padding replicates the first sample (f.pad(..., "replicate")).
         let mut previous = row[0];
         row[0] -= PREEMPHASIS * previous;
-        for j in 1..size {
-            let current = row[j];
-            row[j] = current - PREEMPHASIS * previous;
+        for value in row[1..size].iter_mut() {
+            let current = *value;
+            *value = current - PREEMPHASIS * previous;
             previous = current;
         }
         let dst = &mut out[frame * padded..frame * padded + size];
@@ -304,6 +303,7 @@ fn environment() -> Result<&'static PathBuf> {
 }
 
 /// Default `campplus.onnx`: `MING_CAMPPLUS_ONNX`, else the sibling checkpoint.
+#[cfg(test)]
 pub fn resolve_campplus() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("MING_CAMPPLUS_ONNX") {
         let path = PathBuf::from(path);
@@ -375,6 +375,7 @@ pub fn embed_features(model: &Path, features: &[f32], frames: usize) -> Result<V
 
 /// 192-dim speaker embedding from 16 kHz mono audio, using the checkpoint's
 /// `campplus.onnx`.
+#[cfg(test)]
 pub fn embed_16k(wav_16k: &[f32]) -> Result<Vec<f32>> {
     let model = resolve_campplus()?;
     embed_16k_with(&model, wav_16k)
@@ -382,6 +383,7 @@ pub fn embed_16k(wav_16k: &[f32]) -> Result<Vec<f32>> {
 
 /// Convenience wrapper mirroring ming_tts._load_prompt: resample to 16 kHz
 /// first when needed, then embed.
+#[cfg(test)]
 pub fn embed(wav: &[f32], sample_rate: u32) -> Result<Vec<f32>> {
     if sample_rate == 16000 {
         embed_16k(wav)

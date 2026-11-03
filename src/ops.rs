@@ -258,6 +258,25 @@ impl AttendParams {
 }
 
 /// All compute kernels, compiled once and shared by every stage on one device.
+/// Arguments of one CFM Euler step (see [`Ops::cfm_step`]).
+pub struct CfmStep<'a> {
+    /// Conditional prediction buffer; the null prediction may live in the same
+    /// buffer at `off_null` (the batched CFG path).
+    pub pred: &'a Buffer,
+    pub null: &'a Buffer,
+    pub sde: &'a Buffer,
+    /// Output (updated in place).
+    pub y: &'a Buffer,
+    pub cfg: f32,
+    pub dt: f32,
+    pub k: f32,
+    /// Offset of the conditional prediction inside `pred`.
+    pub off: usize,
+    /// Offset of the null prediction inside `null` (or `pred` when shared).
+    pub off_null: usize,
+    pub n: usize,
+}
+
 pub struct Ops {
     pub gpu: Gpu,
     k_rms: crate::nn::Kernel,
@@ -449,7 +468,7 @@ impl Ops {
     }
 
     fn t6_plan(&self, lin: &Lin) -> Option<(&crate::nn::Kernel, usize)> {
-        if lin.in_features % 256 != 0 {
+        if !lin.in_features.is_multiple_of(256) {
             return None;
         }
         // Four lanes/row wins the isolated K=4096 microbench but only emits
@@ -514,7 +533,7 @@ impl Ops {
                 return;
             }
         }
-        if t == 1 && lin.in_features % 8 == 0 && lin.rows % 8 == 0 {
+        if t == 1 && lin.in_features.is_multiple_of(8) && lin.rows.is_multiple_of(8) {
             let (k, per_wg) = self
                 .t1_plan(lin)
                 .unwrap_or((&self.k_linear_v4, 8));
@@ -542,8 +561,8 @@ impl Ops {
     pub fn linear_big(&self, lin: &Lin, x: &Buffer, t: usize) -> Result<Buffer> {
         if t > 8
             && self.prefill_tiled
-            && lin.rows % 64 == 0
-            && lin.in_features % 32 == 0
+            && lin.rows.is_multiple_of(64)
+            && lin.in_features.is_multiple_of(32)
         {
             let y = self.gpu.storage((t * lin.rows * 4) as u64, "linear.y");
             self.tile_chunks(lin, x, &y, t);
@@ -584,7 +603,7 @@ impl Ops {
         // each weight read feeds twice as many tokens -- this halves the weight
         // traffic of the VAE decoder (t=252: 42 passes -> 21) without the
         // shared-memory transpose the tiled kernel needs.
-        if t > 8 && self.t6_vec4 && self.t12 && lin.in_features % 128 == 0 {
+        if t > 8 && self.t6_vec4 && self.t12 && lin.in_features.is_multiple_of(128) {
             let per_wg = 32;
             let mut tok0 = 0usize;
             while tok0 < t {
@@ -610,7 +629,7 @@ impl Ops {
         // whole vec4 granules, i.e. in_features % 8 == 0; the % 128 guard is
         // kept because loosening it changes the encoder's reduction order for
         // no measured gain.
-        if t > 8 && self.t6_vec4 && lin.in_features % 128 == 0 {
+        if t > 8 && self.t6_vec4 && lin.in_features.is_multiple_of(128) {
             let per_wg = 32;
             let mut tok0 = 0usize;
             while tok0 < t {
@@ -648,7 +667,7 @@ impl Ops {
             }
         }
         // Six-token DiT batch: vec4 weight loads, six accumulator groups.
-        if t == 6 && lin.in_features % 8 == 0 && lin.rows % 8 == 0 {
+        if t == 6 && lin.in_features.is_multiple_of(8) && lin.rows.is_multiple_of(8) {
             self.k_linear_v4t6.run(
                 &self.gpu,
                 &uni2(lin.rows as u32, (lin.in_features / 8) as u32),
@@ -660,7 +679,7 @@ impl Ops {
             return;
         }
         // Single-token decode: vec4 (16 B) weight loads instead of one u32.
-        if t == 1 && lin.in_features % 8 == 0 && lin.rows % 8 == 0 {
+        if t == 1 && lin.in_features.is_multiple_of(8) && lin.rows.is_multiple_of(8) {
             let (k, per_wg) = self
                 .t1_plan(lin)
                 .unwrap_or((&self.k_linear_v4, 8));
@@ -692,7 +711,7 @@ impl Ops {
                 ),
                 &[&lin.w, x, &lin.b],
                 y,
-                ((lin.rows + 7) / 8) as u32,
+                lin.rows.div_ceil(8) as u32,
                 1,
             );
         } else {
@@ -701,7 +720,7 @@ impl Ops {
                 &uni2(lin.rows as u32, (lin.in_features / 2) as u32),
                 &[&lin.w, x, &lin.b],
                 y,
-                ((lin.rows + 7) / 8) as u32,
+                lin.rows.div_ceil(8) as u32,
                 t as u32,
             );
         }
@@ -764,7 +783,7 @@ impl Ops {
 
     pub fn silu_mul(&self, g: &Buffer, u: &Buffer, n: usize) -> Buffer {
         let y = self.gpu.storage((n * 4) as u64, "silu.y");
-        self.k_silu.run(&self.gpu, &uni1(n as u32), &[g, u], &y, ((n + 255) / 256) as u32, 1);
+        self.k_silu.run(&self.gpu, &uni1(n as u32), &[g, u], &y, n.div_ceil(256) as u32, 1);
         y
     }
 
@@ -891,6 +910,7 @@ impl Ops {
         self.k_kv_write.run(&self.gpu, &u, &[src], cache, tokens as u32, 1);
     }
 
+    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
     pub fn kv_write_cached(
         &self,
         key: u64,
@@ -967,6 +987,7 @@ impl Ops {
             .run(&self.gpu, &u, &[q, kc, vc], y, n_q_heads as u32, p.t_q as u32);
     }
 
+    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
     pub fn attend_into_cached(
         &self,
         p: &AttendParams,
@@ -1011,12 +1032,13 @@ impl Ops {
             &uni1(dim as u32),
             &[a, b, c],
             y,
-            ((rows * dim + 255) / 256) as u32,
+            (rows * dim).div_ceil(256) as u32,
             1,
         );
     }
 
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
     pub fn pack3_into_cached(
         &self,
         a: &Buffer,
@@ -1033,7 +1055,7 @@ impl Ops {
             &uni1(dim as u32),
             &[a, b, c],
             y,
-            ((rows * dim + 255) / 256) as u32,
+            (rows * dim).div_ceil(256) as u32,
             1,
         );
     }
@@ -1069,12 +1091,13 @@ impl Ops {
             &uni1(dim as u32),
             &[y_cond, x_hist, x_now, y_null],
             y,
-            ((rows * dim + 255) / 256) as u32,
+            (rows * dim).div_ceil(256) as u32,
             1,
         );
     }
 
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
     pub fn pack6_into_cached(
         &self,
         y_cond: &Buffer,
@@ -1092,7 +1115,7 @@ impl Ops {
             &uni1(dim as u32),
             &[y_cond, x_hist, x_now, y_null],
             y,
-            ((rows * dim + 255) / 256) as u32,
+            (rows * dim).div_ceil(256) as u32,
             1,
         );
     }
@@ -1100,27 +1123,21 @@ impl Ops {
     /// One CFM Euler step, on device: y += (pred + (pred-null)*cfg)*dt + k*sde.
     /// `off` / `off_null` locate the two predictions inside their buffers (the
     /// batched path keeps both in one).
-    pub fn cfm_step(
-        &self,
-        pred: &Buffer,
-        null: &Buffer,
-        sde: &Buffer,
-        y: &Buffer,
-        cfg: f32,
-        dt: f32,
-        k: f32,
-        off: usize,
-        off_null: usize,
-        n: usize,
-    ) {
+    pub fn cfm_step(&self, p: &CfmStep<'_>) {
         let mut u = [0u8; 32];
-        u[0..4].copy_from_slice(&(n as u32).to_le_bytes());
-        u[4..8].copy_from_slice(&dt.to_le_bytes());
-        u[8..12].copy_from_slice(&cfg.to_le_bytes());
-        u[12..16].copy_from_slice(&k.to_le_bytes());
-        u[16..20].copy_from_slice(&(off as u32).to_le_bytes());
-        u[20..24].copy_from_slice(&(off_null as u32).to_le_bytes());
-        self.k_cfm
-            .run(&self.gpu, &u, &[pred, null, sde], y, ((n + 255) / 256) as u32, 1);
+        u[0..4].copy_from_slice(&(p.n as u32).to_le_bytes());
+        u[4..8].copy_from_slice(&p.dt.to_le_bytes());
+        u[8..12].copy_from_slice(&p.cfg.to_le_bytes());
+        u[12..16].copy_from_slice(&p.k.to_le_bytes());
+        u[16..20].copy_from_slice(&(p.off as u32).to_le_bytes());
+        u[20..24].copy_from_slice(&(p.off_null as u32).to_le_bytes());
+        self.k_cfm.run(
+            &self.gpu,
+            &u,
+            &[p.pred, p.null, p.sde],
+            p.y,
+            p.n.div_ceil(256) as u32,
+            1,
+        );
     }
 }

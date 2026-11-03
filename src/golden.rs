@@ -6,11 +6,12 @@
 
 // Parts of this module are exercised only by the parity tests (they read
 // goldens) or kept as public API; the release binary does not call them.
-#![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
 
 pub struct Npy {
+    /// Read by the parity tests; the runtime only needs `data`.
+    #[allow(dead_code)]
     pub shape: Vec<usize>,
     pub data: Vec<f32>,
 }
@@ -46,15 +47,15 @@ pub fn read_npy(path: &std::path::Path) -> Result<Npy> {
     let payload = &bytes[off + hdr_len..];
     let data = match dtype {
         D::F32 => payload
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect(),
         D::F64 => payload
-            .chunks_exact(8)
+            .as_chunks::<8>().0.iter()
             .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32)
             .collect(),
         D::I64 => payload
-            .chunks_exact(8)
+            .as_chunks::<8>().0.iter()
             .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32)
             .collect(),
         D::Bool => payload.iter().map(|&b| b as f32).collect(),
@@ -76,7 +77,7 @@ fn extract<'a>(header: &'a str, key: &'a str) -> Result<String> {
         + key.len();
     let rest = &header[start..];
     let end = rest
-        .find(|c| c == ',' || c == '}')
+        .find([',', '}'])
         .with_context(|| format!("unterminated {key}"))?;
     Ok(rest[..end]
         .trim()
@@ -91,6 +92,8 @@ fn parse_shape(s: &str) -> Vec<usize> {
         .filter_map(|p| p.trim().parse::<usize>().ok())
         .collect()
 }
+
+#[cfg(test)]
 
 pub fn rel_l2(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());

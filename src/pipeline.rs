@@ -105,7 +105,7 @@ pub struct Pipeline {
     pub gpu: Gpu,
     pub w: Weights,
     /// Kept so callers can report which large-t strategy the adapter picked.
-    pub ops: std::sync::Arc<crate::ops::Ops>,
+    pub ops: std::rc::Rc<crate::ops::Ops>,
     pub llm: LlmEngine,
     pub dit: DitEngine,
     pub dec: VaeDecoder,
@@ -145,7 +145,7 @@ impl Pipeline {
         let w = Weights::load(&model_dir.join("model.safetensors"))?;
         let gpu = Gpu::with_pref(pref)?;
         // One compiled kernel set and one device for every stage.
-        let ops = std::sync::Arc::new(crate::ops::Ops::new(gpu.clone()));
+        let ops = std::rc::Rc::new(crate::ops::Ops::new(gpu.clone()));
         let llm = LlmEngine::load(gpu.clone(), ops.clone(), &w)?;
         let dit = DitEngine::load(gpu.clone(), ops.clone(), &w)?;
         let dec = VaeDecoder::load(gpu.clone(), ops.clone(), &w)?;

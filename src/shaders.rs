@@ -547,7 +547,7 @@ fn main(
 /// three steps. Paired activation loads are retained from
 /// [`GEMV_T6_PAIRED`].
 fn gemv_t6_lanes(lanes: u32, threads: u32) -> String {
-    assert!(32 % lanes == 0 && threads % 32 == 0 && threads % lanes == 0);
+    assert!(32 % lanes == 0 && threads.is_multiple_of(32) && threads.is_multiple_of(lanes));
     let tok: u32 = 6;
     let rows_per_wg = threads / lanes;
     let offsets = [0u32, lanes, 2 * lanes, 3 * lanes];
@@ -679,7 +679,7 @@ pub fn gemv_t6_fourlane() -> String {
 /// `lanes in {8, 32}` with `unroll in {1, 2, 4}`.
 pub fn gemv_t6_vec4(lanes: u32, threads: u32, rpl: u32, unroll: u32, guarded: bool, tok: u32) -> String {
     assert!(lanes > 0 && 32 % lanes == 0, "lanes must divide a warp");
-    assert!(threads % 32 == 0 && threads % lanes == 0);
+    assert!(threads.is_multiple_of(32) && threads.is_multiple_of(lanes));
     assert!(rpl >= 1 && unroll >= 1);
     let rowgroups = threads / lanes;
     let rows_per_wg = rowgroups * rpl;
@@ -944,7 +944,7 @@ fn main(
 /// emit enough workgroups. Lane count also sets the barrier-tree depth (log2).
 pub fn gemv_t1_vec4(lanes: u32, threads: u32, rpl: u32) -> String {
     assert!(lanes > 0 && 32 % lanes == 0, "lanes must divide a warp");
-    assert!(threads % 32 == 0 && threads % lanes == 0);
+    assert!(threads.is_multiple_of(32) && threads.is_multiple_of(lanes));
     assert!(rpl >= 1);
     let rowgroups = threads / lanes;
     let rows_per_wg = rowgroups * rpl;
@@ -1485,11 +1485,6 @@ fn main(
 }
 "#;
 
-/// RoPE applied in place to q or k, one token per workgroup.
-/// interlected=0: Qwen2 rotate-half (pairs hd, hd+32); =1: x_transformers
-/// interleaved (pairs 2hd, 2hd+1). Angle tables [512, 32] f32 host-side.
-/// pos = pos_base + wg.x; dispatch (1, 1) for decode, (T, 1) for prefill.
-
 /// Scalar attention for software adapters (DX12 WARP / lavapipe).
 ///
 /// Same maths as [ATTEND], but it deliberately avoids the two tree
@@ -1904,7 +1899,7 @@ fn main(
 "#;
 
 /// GELU for software adapters. Same formula, but tanh is written as
-/// 1 - 2/(exp(2|x|)+1) with the sign restored: D3D12 WARP lowers 	anh to a
+/// 1 - 2/(exp(2|x|)+1) with the sign restored: D3D12 WARP lowers `tanh` to a
 /// form that overflows for |argument| > ~44 (inf/inf), which showed up as a
 /// 0.34 rel_l2 in the DiT block and as NaNs downstream. GPU drivers have a
 /// saturating native tanh, so they keep [GELU_TANH] unchanged.

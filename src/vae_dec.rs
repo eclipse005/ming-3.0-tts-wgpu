@@ -7,7 +7,6 @@
 
 // Parts of this module are exercised only by the parity tests (they read
 // goldens) or kept as public API; the release binary does not call them.
-#![allow(dead_code)]
 
 use crate::gpu::Gpu;
 use crate::istft::Istft;
@@ -17,7 +16,7 @@ use crate::weights::Weights;
 use anyhow::Result;
 use rustfft::num_complex::Complex32;
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::rc::Rc;
 use wgpu::Buffer;
 
 const DEC_LAYERS: usize = 24;
@@ -34,11 +33,11 @@ pub struct VaeDecoder {
     head: Lin,
     istft: Istft,
     kv: RefCell<KvCache>,
-    ops: Arc<Ops>,
+    ops: Rc<Ops>,
 }
 
 impl VaeDecoder {
-    pub fn load(gpu: Gpu, ops: Arc<Ops>, w: &Weights) -> Result<Self> {
+    pub fn load(gpu: Gpu, ops: Rc<Ops>, w: &Weights) -> Result<Self> {
         let p = |name: &str| w.get(name);
         let lin = |base: &str, rows: usize, inf: usize| -> Result<Lin> {
             Lin::load(&gpu, w, base, rows, inf)
@@ -74,11 +73,14 @@ impl VaeDecoder {
         })
     }
 
+    #[cfg(test)]
+
     pub fn sample_rate(&self) -> usize {
         44100
     }
 
     /// Hop in samples (50 frames per second).
+    #[cfg(test)]
     pub fn hop(&self) -> usize {
         882
     }
@@ -183,14 +185,19 @@ impl VaeDecoder {
     }
 
     // ---- bisect helpers (parity diagnostics) ----
+    #[cfg(test)]
     pub fn fc1_check(&self, latent: &[f32], t_lat: usize) -> Result<Vec<f32>> {
         self.fc1_out(latent, t_lat)
     }
+
+    #[cfg(test)]
 
     pub fn upsample_check(&self, latent: &[f32], t_lat: usize) -> Result<Vec<f32>> {
         let e = self.fc1_out(latent, t_lat)?;
         Ok(linear_upsample(&e, t_lat, HIDDEN, UPSAMPLE))
     }
+
+    #[cfg(test)]
 
     pub fn stack_check(&self, up: &[f32], t: usize) -> Result<Vec<f32>> {
         let x = self.gpu.upload_f32(up, "dec.up2");
@@ -198,6 +205,8 @@ impl VaeDecoder {
         let z = self.rms(&h, &self.dec_norm, t);
         self.gpu.read_f32(&z, t * HIDDEN)
     }
+
+    #[cfg(test)]
 
     pub fn head_check(&self, up: &[f32], t: usize) -> Result<Vec<f32>> {
         let x = self.gpu.upload_f32(up, "dec.up3");
@@ -209,6 +218,7 @@ impl VaeDecoder {
 
     /// torch.nn.Upsample(scale_factor, mode="linear", align_corners=False)
     /// along the time axis of a [t, ch] row-major tensor.
+    #[cfg(test)]
     pub fn upsample_from(enc: &[f32], t_in: usize, ch: usize) -> Vec<f32> {
         linear_upsample(enc, t_in, ch, UPSAMPLE)
     }

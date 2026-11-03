@@ -76,6 +76,7 @@ fn make_pipeline(gpu: &Gpu, src: &str, storage_ro: usize) -> (BindGroupLayout, C
 }
 
 /// Record one dispatch: uniform block -> arena slot, bind, enqueue.
+    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
 fn record(
     gpu: &Gpu,
     bgl: &BindGroupLayout,
@@ -162,6 +163,7 @@ impl Kernel {
     /// The caller must keep the same buffer set for a key. DiT uses persistent
     /// scratch and immutable weights, so its groups survive all CFM steps;
     /// one-shot paths must keep using [`Self::run`].
+    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
     pub fn run_cached(
         &self,
         gpu: &Gpu,
@@ -220,7 +222,7 @@ pub fn gemv_bf16w_buf(
     u[4..8].copy_from_slice(&((in_features / 2) as u32).to_le_bytes());
     let (bgl, pipe) = make_pipeline(gpu, shaders::GEMV_BF16W, 3);
     record(gpu, &bgl, &pipe, &u, &[w_buf, &x_buf, b_buf], &y_buf,
-           ((rows + 7) / 8) as u32, 1);
+           rows.div_ceil(8) as u32, 1);
     gpu.read_f32(&y_buf, rows)
 }
 

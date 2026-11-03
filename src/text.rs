@@ -612,7 +612,7 @@ fn nfc(text: &str) -> std::borrow::Cow<'_, str> {
             }
             // Hangul LV syllable + T jamo
             if ('\u{AC00}'..='\u{D7A3}').contains(&last)
-                && (last as u32 - 0xAC00) % 28 == 0
+                && (last as u32 - 0xAC00).is_multiple_of(28)
                 && ('\u{11A8}'..='\u{11C2}').contains(&c)
             {
                 out.pop();
@@ -881,11 +881,11 @@ fn alternate_quotes(text: &str) -> String {
         match c {
             '"' => {
                 dq += 1;
-                out.push(if dq % 2 != 0 { '“' } else { '”' });
+                out.push(if !dq.is_multiple_of(2) { '“' } else { '”' });
             }
             '\'' => {
                 sq += 1;
-                out.push(if sq % 2 != 0 { '‘' } else { '’' });
+                out.push(if !sq.is_multiple_of(2) { '‘' } else { '’' });
             }
             other => out.push(other),
         }
@@ -967,7 +967,7 @@ fn drop_weak_before_strong(text: &str) -> String {
     let mut out: Vec<char> = Vec::with_capacity(text.chars().count());
     for c in text.chars() {
         if STRONG_PUNCT.contains(c) {
-            while out.last().map_or(false, |p| WEAK_PUNCT.contains(*p)) {
+            while out.last().is_some_and(|p| WEAK_PUNCT.contains(*p)) {
                 out.pop();
             }
         }
@@ -980,7 +980,7 @@ fn drop_weak_before_strong(text: &str) -> String {
 fn drop_weak_after_strong(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if WEAK_PUNCT.contains(c) && out.chars().last().map_or(false, |p| STRONG_PUNCT.contains(p)) {
+        if WEAK_PUNCT.contains(c) && out.chars().last().is_some_and(|p| STRONG_PUNCT.contains(p)) {
             continue;
         }
         out.push(c);
@@ -993,7 +993,7 @@ fn merge_weak_runs_into_dunhao(text: &str) -> String {
     let mut out: Vec<char> = Vec::with_capacity(text.chars().count());
     for c in text.chars() {
         if c == '、' {
-            while out.last().map_or(false, |p| *p == '，' || *p == '；') {
+            while out.last().is_some_and(|p| *p == '，' || *p == '；') {
                 out.pop();
             }
             out.push('、');
@@ -1011,7 +1011,7 @@ fn merge_weak_runs_into_dunhao(text: &str) -> String {
 fn squash_runs_to_first(text: &str, set: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if set.contains(c) && out.chars().last().map_or(false, |p| set.contains(p)) {
+        if set.contains(c) && out.chars().last().is_some_and(|p| set.contains(p)) {
             continue;
         }
         out.push(c);
@@ -1164,12 +1164,12 @@ where
         if !py_strip(segment).is_empty() {
             // Reinstate the boundary whitespace so an English word is not glued
             // onto the neighbouring tag.
-            let lead = if segment.chars().next().map_or(false, py_isspace) {
+            let lead = if segment.chars().next().is_some_and(py_isspace) {
                 " "
             } else {
                 ""
             };
-            let trail = if segment.chars().last().map_or(false, py_isspace) {
+            let trail = if segment.chars().last().is_some_and(py_isspace) {
                 " "
             } else {
                 ""
@@ -1227,7 +1227,7 @@ pub fn append_text_fragment(
                 && new_text
                     .chars()
                     .next()
-                    .map_or(false, |c| c.is_ascii_alphanumeric())
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
             {
                 separator = " ";
             }

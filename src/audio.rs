@@ -54,7 +54,7 @@ pub fn read_wav(path: &str) -> Result<(Vec<f32>, u32)> {
         // model writes 32-bit float).
         (format, bits) => bail!("{path}: unsupported wav format {format:?} {bits} bit"),
     };
-    if interleaved.len() % channels != 0 {
+    if !interleaved.len().is_multiple_of(channels) {
         bail!(
             "{path}: {} samples is not a multiple of {channels} channels",
             interleaved.len()

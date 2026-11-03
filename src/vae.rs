@@ -5,7 +5,6 @@
 
 // Parts of this module are exercised only by the parity tests (they read
 // goldens) or kept as public API; the release binary does not call them.
-#![allow(dead_code)]
 
 use crate::gpu::Gpu;
 use crate::ops::{AttendParams, KvCache, Lin, Ops, QwenLayer};
@@ -13,7 +12,7 @@ use crate::qwen_lm::{HEAD_DIM, HIDDEN, KV_CAP, KV_HEADS, Q_HEADS, ROPE_THETA};
 use crate::weights::Weights;
 use anyhow::Result;
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::rc::Rc;
 use wgpu::Buffer;
 
 const IN_DIM: usize = 882;
@@ -33,11 +32,11 @@ pub struct VaeEncoder {
     enc_norm: Buffer,
     agg_norm: Buffer,
     kv: RefCell<KvCache>,
-    ops: Arc<Ops>,
+    ops: Rc<Ops>,
 }
 
 impl VaeEncoder {
-    pub fn load(gpu: Gpu, ops: Arc<Ops>, w: &Weights) -> Result<Self> {
+    pub fn load(gpu: Gpu, ops: Rc<Ops>, w: &Weights) -> Result<Self> {
         let p = |name: &str| w.get(name);
         let lin = |base: &str, rows: usize, inf: usize| -> Result<Lin> {
             let wt = p(&format!("{base}.weight"))?;
@@ -139,11 +138,14 @@ impl VaeEncoder {
     }
 
     // ---- bisect helpers (parity diagnostics) ----
+    #[cfg(test)]
     pub fn embed_check(&self, frames: &[f32], t: usize) -> Result<Vec<f32>> {
         let x = self.gpu.upload_f32(frames, "v.frames");
         let e1 = self.mrow(&self.fc1, &x, t)?;
         self.gpu.read_f32(&self.mrow(&self.fc2, &e1, t)?, t * HIDDEN)
     }
+
+    #[cfg(test)]
 
     pub fn encode_stack_check(&self, embeds: &[f32], t: usize) -> Result<Vec<f32>> {
         let x = self.gpu.upload_f32(embeds, "v.e2");
@@ -152,11 +154,15 @@ impl VaeEncoder {
         self.gpu.read_f32(&z, t * HIDDEN)
     }
 
+    #[cfg(test)]
+
     pub fn stack_range_check(&self, embeds: &[f32], t: usize, r: std::ops::Range<usize>) -> Result<Vec<f32>> {
         let x = self.gpu.upload_f32(embeds, "v.e2");
         let h = self.stack(&self.enc[r], x, t)?;
         self.gpu.read_f32(&h, t * HIDDEN)
     }
+
+    #[cfg(test)]
 
     pub fn agg_check(&self, enc_out: &[f32], t_frames: usize) -> Result<Vec<f32>> {
         let p_count = (t_frames + PATCH - 1) / PATCH;
@@ -182,6 +188,7 @@ impl VaeEncoder {
     }
 
     /// Layer-0 sub-stage bisect (parity diagnostics).
+    #[cfg(test)]
     pub fn layer0_parts_check(&self, embeds: &[f32], t: usize) -> Result<Vec<(String, Vec<f32>)>> {
         let l = &self.enc[0];
         let xb = self.gpu.upload_f32(embeds, "v.e0");
@@ -246,7 +253,7 @@ impl VaeEncoder {
         let mut out_vec: Vec<(String, Vec<f32>)> = Vec::new();
         let _ = &out_vec;
         let n = waveform.len();
-        let t_frames = (n + HOP - 1) / HOP;
+        let t_frames = n.div_ceil(HOP);
         let mut frames = vec![0f32; t_frames * IN_DIM];
         for t in 0..t_frames {
             let start = t * HOP;
@@ -262,7 +269,7 @@ impl VaeEncoder {
 
         // patch + cls frontend: [P*5, 896]
         let h_host = self.gpu.read_f32(&h, t_frames * HIDDEN)?;
-        let p_count = (t_frames + PATCH - 1) / PATCH;
+        let p_count = t_frames.div_ceil(PATCH);
         let padded = p_count * PATCH;
         let mut seq = vec![0f32; padded * 5 * HIDDEN]; // row 5p+4 = cls
         for p in 0..p_count {
@@ -315,11 +322,14 @@ impl VaeEncoder {
     }
 }
 
+/// Per-stage dumps the parity tests read back after an encode.
+type BisectDump = std::cell::RefCell<Option<Vec<(String, Vec<f32>)>>>;
+
 thread_local! {
-    static BISECT_OUT: std::cell::RefCell<Option<Vec<(String, Vec<f32>)>>> =
-        const { std::cell::RefCell::new(None) };
+    static BISECT_OUT: BisectDump = const { std::cell::RefCell::new(None) };
 }
 impl VaeEncoder {
+    #[cfg(test)]
     pub fn take_bisect(&self) -> Vec<(String, Vec<f32>)> {
         BISECT_OUT.with(|c| c.borrow_mut().take()).unwrap_or_default()
     }

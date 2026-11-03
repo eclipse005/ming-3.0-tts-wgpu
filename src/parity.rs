@@ -15,8 +15,8 @@ fn model_dir() -> std::path::PathBuf {
 
 /// One shared kernel set per test (the engines no longer own their kernels).
 #[cfg(test)]
-fn ops_for(gpu: &crate::gpu::Gpu) -> std::sync::Arc<crate::ops::Ops> {
-    std::sync::Arc::new(crate::ops::Ops::new(gpu.clone()))
+fn ops_for(gpu: &crate::gpu::Gpu) -> std::rc::Rc<crate::ops::Ops> {
+    std::rc::Rc::new(crate::ops::Ops::new(gpu.clone()))
 }
 
 fn golden(name: &str) -> Result<crate::parity::Npy> {
@@ -553,8 +553,8 @@ mod m2_trace_tests {
                 &z[0..896], &lh[0..64], &noise[0..64], &sde[0..640], cfg[0],
                 traces.map(|(a, b, c)| (&mut **a, &mut **b, &mut **c))).unwrap();
         }
-        let py_pred = g("m2_pred_ref.npy").data;
-        let py_null = g("m2_null_ref.npy").data;
+        let _py_pred = g("m2_pred_ref.npy").data;
+        let _py_null = g("m2_null_ref.npy").data;
         let mut worst = 0.0f32;
         for k in 0..tr.len() {
             let want = &ex[k * 64..(k + 1) * 64];
@@ -681,7 +681,7 @@ mod m3_bisect_tests {
         println!("embeds rel_l2={:.3e}", rel_l2(&e, &embeds));
         assert!(rel_l2(&e, &embeds) < 1e-4, "embeds");
         // stage 3: 24-layer encoder (layer 0 first)
-        let layer0 = g("m3_layer0.npy").data;
+        let _layer0 = g("m3_layer0.npy").data;
         for li in [0usize, 1, 2, 4, 8, 16, 23] {
             let lname = format!("m3_layer{li}.npy");
             let ldir = std::env::var("MING_GOLDEN")
@@ -959,7 +959,7 @@ mod m5_tests {
         let embeds = load("inputs_embeds.npy");
         let z_steps = load("z_steps.npy");
         let lat_steps = load("latent_steps.npy");
-        let dec_lat = load("decode_latent.npy");
+        let _dec_lat = load("decode_latent.npy");
         let want_wav = load("waveform.npy");
         let meta = std::fs::read_to_string(d.join("meta.json")).unwrap();
         let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();

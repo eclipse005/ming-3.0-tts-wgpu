@@ -7,7 +7,7 @@ use crate::nn::gemv_bf16w_buf;
 use crate::ops::{AttendParams, Lin, Ops, RopeTables};
 use crate::weights::Weights;
 use anyhow::{bail, Result};
-use std::sync::Arc;
+use std::rc::Rc;
 use wgpu::Buffer;
 
 pub const XH: usize = 1024; // transformer width
@@ -61,6 +61,13 @@ struct XBlock {
     n2: Buffer,
 }
 
+/// Optional per-step trace used by the parity tests: (predictions, latents, ys).
+type FlowTrace<'a> = Option<(
+    &'a mut Vec<Vec<f32>>,
+    &'a mut Vec<Vec<f32>>,
+    &'a mut Vec<Vec<f32>>,
+)>;
+
 pub struct DitEngine {
     gpu: Gpu,
     // timestep embedder
@@ -88,7 +95,7 @@ pub struct DitEngine {
     kv_k: Buffer,
     kv_v: Buffer,
     scratch: Scratch,
-    ops: Arc<Ops>,
+    ops: Rc<Ops>,
 }
 
 /// Elementwise add of two equal-length slices (diagnostic paths only).
@@ -98,7 +105,7 @@ fn vec_add(a: &[f32], b: &[f32]) -> Vec<f32> {
 }
 
 impl DitEngine {
-    pub fn load(gpu: Gpu, ops: Arc<Ops>, w: &Weights) -> Result<Self> {
+    pub fn load(gpu: Gpu, ops: Rc<Ops>, w: &Weights) -> Result<Self> {
         let p = |name: &str| w.get(name);
         let lin = |base: &str, rows: usize, inf: usize| -> Result<Lin> {
             Lin::load(&gpu, w, base, rows, inf)
@@ -563,7 +570,7 @@ impl DitEngine {
         cfg: f32,
         sigma: f32,
         temperature: f32,
-        mut trace: Option<(&mut Vec<Vec<f32>>, &mut Vec<Vec<f32>>, &mut Vec<Vec<f32>>)>,
+        mut trace: FlowTrace<'_>,
     ) -> Result<Vec<f32>> {
         // epss timesteps for n=10, sway coef -1.0 (f32 math like torch)
         let idx = [0usize, 2, 4, 6, 8, 12, 16, 20, 24, 28, 32];
@@ -572,8 +579,8 @@ impl DitEngine {
         for (i, &ix) in idx.iter().enumerate() {
             tv[i] = dtv * ix as f32;
         }
-        for i in 0..=STEPS {
-            tv[i] += -1.0 * ((std::f32::consts::PI / 2.0 * tv[i]).cos() - 1.0 + tv[i]);
+        for v in tv.iter_mut() {
+            *v += -((std::f32::consts::PI / 2.0 * *v).cos() - 1.0 + *v);
         }
         // Everything below stays on the device: the Euler loop used to read
         // the prediction back to the host twice per step, and each readback
@@ -606,7 +613,18 @@ impl DitEngine {
             } else {
                 sde_zero.clone()
             };
-            self.ops.cfm_step(&pair, &pair, &sde_buf, &y, cfg, dt, k, 2 * ZC, 5 * ZC, ZC);
+            self.ops.cfm_step(&crate::ops::CfmStep {
+            pred: &pair,
+            null: &pair,
+            sde: &sde_buf,
+            y: &y,
+            cfg,
+            dt,
+            k,
+            off: 2 * ZC,
+            off_null: 5 * ZC,
+            n: ZC,
+        });
         }
         out.extend_from_slice(&self.gpu.read_f32(&y, ZC)?);
         Ok(out)

@@ -21,31 +21,31 @@ pub struct Gpu {
     /// utterance (the CUDA build was saved by CUDA graphs for the same
     /// reason). Launches now accumulate into one encoder that is flushed at
     /// the next synchronisation point (a readback) or when it grows large.
-    dispatches: std::sync::Arc<RefCell<Vec<PendingDispatch>>>,
-    pending_count: std::sync::Arc<std::cell::Cell<usize>>,
+    dispatches: std::rc::Rc<RefCell<Vec<PendingDispatch>>>,
+    pending_count: std::rc::Rc<std::cell::Cell<usize>>,
     /// One upload buffer for every dispatch's uniform block. Each recorded
     /// dispatch owns a 256-byte slot and the whole thing is uploaded once per
     /// flush; that is the only way to keep per-dispatch uniforms *and* a
     /// deferred submission, because Queue::write_buffer would otherwise land
     /// before the batch it is supposed to configure.
     arena: Buffer,
-    arena_host: std::sync::Arc<RefCell<Vec<u8>>>,
-    arena_used: std::sync::Arc<std::cell::Cell<usize>>,
+    arena_host: std::rc::Rc<RefCell<Vec<u8>>>,
+    arena_used: std::rc::Rc<std::cell::Cell<usize>>,
     /// Bytes handed to `device.create_buffer` so far, and the largest amount
     /// created between two flushes (a flush is what lets the previous wave of
     /// recordings -- and therefore their buffers -- go). `MING_MEM=1` prints
     /// both: the first is "what the pipeline asked for", the second is a good
     /// proxy for the peak live set of one stage.
-    alloc_count: std::sync::Arc<std::cell::Cell<u64>>,
-    dispatch_count: std::sync::Arc<std::cell::Cell<u64>>,
-    alloc_bytes: std::sync::Arc<std::cell::Cell<u64>>,
-    alloc_since_flush: std::sync::Arc<std::cell::Cell<u64>>,
-    peak_window: std::sync::Arc<std::cell::Cell<u64>>,
+    alloc_count: std::rc::Rc<std::cell::Cell<u64>>,
+    dispatch_count: std::rc::Rc<std::cell::Cell<u64>>,
+    alloc_bytes: std::rc::Rc<std::cell::Cell<u64>>,
+    alloc_since_flush: std::rc::Rc<std::cell::Cell<u64>>,
+    peak_window: std::rc::Rc<std::cell::Cell<u64>>,
     /// Submits in flight without a wait. Keeping a couple queued lets the CPU
     /// record the next batch while the GPU drains the previous one; a hard cap
     /// (and a byte cap) keeps the live set bounded.
-    in_flight: std::sync::Arc<std::cell::Cell<u32>>,
-    inflight_bytes: std::sync::Arc<std::cell::Cell<u64>>,
+    in_flight: std::rc::Rc<std::cell::Cell<u32>>,
+    inflight_bytes: std::rc::Rc<std::cell::Cell<u64>>,
     /// Dispatches per submit. A submit of >=1024 recorded dispatches lost the
     /// device on Vulkan/NVIDIA (Windows TDR while the driver compiles that
     /// batch's pipelines), so the bound is 256 everywhere -- vendor-specific
@@ -211,7 +211,7 @@ impl Gpu {
                 continue;
             }
             let rank = (tr, backend_rank(info.backend));
-            if picked.as_ref().map_or(true, |(best, _)| rank < *best) {
+            if picked.as_ref().is_none_or(|(best, _)| rank < *best) {
                 picked = Some((rank, adapter));
             }
         }
@@ -265,18 +265,18 @@ impl Gpu {
             adapter_name: info.name,
             backend,
             device_type: info.device_type,
-            dispatches: std::sync::Arc::new(RefCell::new(Vec::new())),
-            pending_count: std::sync::Arc::new(std::cell::Cell::new(0)),
+            dispatches: std::rc::Rc::new(RefCell::new(Vec::new())),
+            pending_count: std::rc::Rc::new(std::cell::Cell::new(0)),
             arena,
-            arena_host: std::sync::Arc::new(RefCell::new(Vec::new())),
-            arena_used: std::sync::Arc::new(std::cell::Cell::new(0)),
-            alloc_count: std::sync::Arc::new(std::cell::Cell::new(0)),
-            dispatch_count: std::sync::Arc::new(std::cell::Cell::new(0)),
-            alloc_bytes: std::sync::Arc::new(std::cell::Cell::new(0)),
-            alloc_since_flush: std::sync::Arc::new(std::cell::Cell::new(0)),
-            peak_window: std::sync::Arc::new(std::cell::Cell::new(0)),
-            in_flight: std::sync::Arc::new(std::cell::Cell::new(0)),
-            inflight_bytes: std::sync::Arc::new(std::cell::Cell::new(0)),
+            arena_host: std::rc::Rc::new(RefCell::new(Vec::new())),
+            arena_used: std::rc::Rc::new(std::cell::Cell::new(0)),
+            alloc_count: std::rc::Rc::new(std::cell::Cell::new(0)),
+            dispatch_count: std::rc::Rc::new(std::cell::Cell::new(0)),
+            alloc_bytes: std::rc::Rc::new(std::cell::Cell::new(0)),
+            alloc_since_flush: std::rc::Rc::new(std::cell::Cell::new(0)),
+            peak_window: std::rc::Rc::new(std::cell::Cell::new(0)),
+            in_flight: std::rc::Rc::new(std::cell::Cell::new(0)),
+            inflight_bytes: std::rc::Rc::new(std::cell::Cell::new(0)),
             max_pending,
         })
     }
@@ -501,7 +501,7 @@ impl Gpu {
         }
         let n = self.pending_count.get() + 1;
         self.pending_count.set(n);
-        if n % self.max_pending == 0 {
+        if n.is_multiple_of(self.max_pending) {
             self.flush();
         }
     }

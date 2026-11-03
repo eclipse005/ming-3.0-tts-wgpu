@@ -7,7 +7,6 @@
 //! and incremental decode) with the stop head. The DiT/CFM and VAE towers get
 //! the same treatment in later stages.
 
-#![allow(dead_code)]
 
 use anyhow::{bail, Result};
 use rayon::prelude::*;
@@ -59,7 +58,7 @@ impl Mat {
     /// One row of activations against every weight row, row-parallel.
     fn gemv(&self, x: &[f32], out: &mut [f32]) {
         let k = self.cols;
-        let chunk = (self.rows / (rayon::current_num_threads() * 4)).max(32).min(1024);
+        let chunk = (self.rows / (rayon::current_num_threads() * 4)).clamp(32, 1024);
         out.par_chunks_mut(chunk).enumerate().for_each(|(ci, slab)| {
             let r0 = ci * chunk;
             for (off, o) in slab.iter_mut().enumerate() {
@@ -94,7 +93,7 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Weight-row outer, token inner: each weight row is read once and dotted
 /// against every token, which is what keeps the traffic at one pass over the
-/// checkpoint (the naive or t { dot(all rows) } version re-reads it m times).
+/// checkpoint (the naive `for t { dot(all rows) }` version re-reads it m times).
 /// Results are accumulated row-major by output row, then transposed into out.
 fn gemm_row_major(out: &mut [f32], a: &[f32], b: &[f32], m: usize, n: usize, k: usize) {
     if m == 0 || n == 0 || k == 0 {
@@ -188,7 +187,7 @@ pub fn attention_window(
         let head = idx % n_q_heads;
         let kvh = head / group;
         let qpos = pos_base + t_i;
-        let lo = if window == 0 || qpos + 1 <= window {
+        let lo = if window == 0 || qpos < window {
             0
         } else {
             qpos + 1 - window
@@ -250,7 +249,7 @@ fn timestep_embedding(t: f32) -> Vec<f32> {
 
 fn gelu_tanh(x: &[f32], out: &mut [f32]) {
     out.par_iter_mut().zip(x).for_each(|(o, &v)| {
-        let beta = 0.7978845608028654f32;
+        let beta = 0.797_884_6_f32;
         let kappa = 0.044715f32;
         *o = 0.5 * v * (1.0 + (v * beta * (1.0 + v * v * kappa)).tanh());
     });
@@ -374,12 +373,12 @@ impl CpuLlm {
         rmsnorm(&h, &self.norm_final, t, HIDDEN, &mut a);
         let last = &a[(t - 1) * HIDDEN..t * HIDDEN];
         let mut logits = [0.0f32; 2];
-        for r in 0..2 {
+        for (r, slot) in logits.iter_mut().enumerate() {
             let mut s = self.stop_b[r];
-            for i in 0..HIDDEN {
-                s += self.stop_w[r * HIDDEN + i] * last[i];
+            for (i, &v) in last.iter().enumerate() {
+                s += self.stop_w[r * HIDDEN + i] * v;
             }
-            logits[r] = s;
+            *slot = s;
         }
         let mx = logits[0].max(logits[1]);
         let e0 = (logits[0] - mx).exp();
@@ -504,9 +503,9 @@ fn rope_interleaved(x: &mut [f32], inv_freq: &[f32], n_heads: usize, pos_base: u
     }
 }
 
-/// Bidirectional attention over all 	 rows (the DiT's non-grouped path and the
-/// aggregator). ttention above is the LLM's *causal* one -- using it here was
-/// the reason the single-branch DiT forward disagreed with the GPU.
+/// Bidirectional attention over all rows (the DiT's non-grouped path and the
+/// aggregator). `attention` above is the LLM's *causal* one -- using it here
+/// was the reason the single-branch DiT forward disagreed with the GPU.
 fn attention_full(
     q: &[f32],
     k_cache: &[f32],
@@ -550,8 +549,8 @@ fn attention_full(
     });
 }
 
-/// Causal/grouped attention used by the DiT: rows 	 are packed into groups of
-/// group (3 for the CFG pair); each row attends only inside its own group.
+/// Causal/grouped attention used by the DiT: rows are packed into groups of
+/// `group` (3 for the CFG pair); each row attends only inside its own group.
 fn attention_group(
     q: &[f32],
     k_cache: &[f32],
@@ -735,6 +734,7 @@ impl CpuDit {
     }
 
     /// Block-0 sub-operator dump (same order as the GPU's lock0_parts).
+    #[cfg(test)]
     pub fn block0_parts(&self, x: &[f32], tstep: f32, c: &[f32], lh: &[f32]) -> Vec<(String, Vec<f32>)> {
         let temb = timestep_embedding(tstep);
         let mut tm1 = vec![0.0f32; XH];
@@ -809,6 +809,7 @@ impl CpuDit {
     }
 
     /// Single-branch (3-row) forward, the reference path the GPU tests use.
+    #[cfg(test)]
     pub fn forward_single(&self, x: &[f32], tstep: f32, c: &[f32], lh: &[f32]) -> Vec<f32> {
         let temb = timestep_embedding(tstep);
         let mut tm1 = vec![0.0f32; XH];
@@ -838,6 +839,7 @@ impl CpuDit {
     }
 
     /// CFM Euler integration (epss timesteps + sway), same schedule as dit.rs.
+    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
     pub fn sample(&self, z: &[f32], lh: &[f32], noise: &[f32], sde: &[f32], cfg: f32, sigma: f32, temperature: f32) -> Vec<f32> {
         let idx = [0usize, 2, 4, 6, 8, 12, 16, 20, 24, 28, 32];
         let dtv = 1.0f32 / 32.0;
@@ -846,7 +848,7 @@ impl CpuDit {
             tv[i] = dtv * ix as f32;
         }
         for v in tv.iter_mut() {
-            *v += -1.0 * ((std::f32::consts::PI / 2.0 * *v).cos() - 1.0 + *v);
+            *v += -((std::f32::consts::PI / 2.0 * *v).cos() - 1.0 + *v);
         }
         let mut y = noise.to_vec();
         for step in 0..DIT_STEPS {
@@ -1134,6 +1136,7 @@ impl CpuPipeline {
 
     /// The autoregressive loop: LLM step -> CFM sample -> aggregator, until the
     /// stop head fires (same ordering and quirks as pipeline.rs).
+    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
     pub fn decode_loop(
         &mut self,
         embeds: &[f32],
@@ -1152,8 +1155,7 @@ impl CpuPipeline {
         let (mut z, mut prob) = self.llm.prefill(embeds, t)?;
         let mut history = vec![0.0f32; ZC];
         let mut latents: Vec<f32> = Vec::new();
-        let mut pos = t;
-        for step in 0..steps {
+        for (step, pos) in (t..).take(steps).enumerate() {
             let nz = noise.draw(ZC);
             let sde = noise.draw(DIT_STEPS * ZC);
             let lat = self
@@ -1167,7 +1169,6 @@ impl CpuPipeline {
             let (z2, p2) = self.llm.step(&emb, pos)?;
             z = z2;
             prob = p2;
-            pos += 1;
             history.copy_from_slice(&lat);
         }
         Ok(latents)

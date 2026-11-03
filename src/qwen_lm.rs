@@ -9,7 +9,7 @@ use crate::gpu::Gpu;
 use crate::ops::{AttendParams, Lin, Ops, RopeTables};
 use crate::weights::Weights;
 use anyhow::{bail, Result};
-use std::sync::Arc;
+use std::rc::Rc;
 use wgpu::Buffer;
 
 pub const HIDDEN: usize = 896;
@@ -62,7 +62,7 @@ pub struct LlmEngine {
     stop_host_w: Vec<f32>,
     stop_host_b: Vec<f32>,
     rope: RopeTables,
-    ops: Arc<Ops>,
+    ops: Rc<Ops>,
 }
 
 
@@ -79,7 +79,7 @@ fn nan_probe(gpu: &Gpu, label: &str, buf: &Buffer, n: usize) {
 }
 
 impl LlmEngine {
-    pub fn load(gpu: Gpu, ops: Arc<Ops>, w: &Weights) -> Result<Self> {
+    pub fn load(gpu: Gpu, ops: Rc<Ops>, w: &Weights) -> Result<Self> {
         let p = |name: &str| w.get(name);
         let mut layers = Vec::with_capacity(LAYERS);
         for i in 0..LAYERS {
@@ -311,12 +311,12 @@ impl LlmEngine {
         let z = self.rms(&xn, &self.norm_final, 1);
         let zc = self.gpu.read_f32(&z, HIDDEN)?;
         let mut logits = [0f32; 2];
-        for r in 0..2 {
+        for (r, slot) in logits.iter_mut().enumerate() {
             let mut s = self.stop_host_b[r];
             for (i, &v) in zc.iter().enumerate() {
                 s += self.stop_host_w[r * HIDDEN + i] * v;
             }
-            logits[r] = s;
+            *slot = s;
         }
         let mx = logits[0].max(logits[1]);
         let e0 = (logits[0] - mx).exp();

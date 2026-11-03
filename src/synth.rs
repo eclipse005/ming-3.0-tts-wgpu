@@ -11,36 +11,67 @@ use crate::tok::Tok;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
+#[derive(clap::Args)]
+#[command(rename_all = "snake_case")]
 pub struct Args {
+    #[arg(long)]
     pub model_path: String,
+    #[arg(long)]
     pub task: String,
+    #[arg(long)]
     pub text: String,
+    #[arg(long)]
     pub output: String,
     /// `cuda:0` (discrete), `igpu` (integrated) or `cpu` (WARP/lavapipe).
+    #[arg(long, default_value = "cuda:0")]
     pub device: String,
+    #[arg(long, default_value_t = 1895)]
     pub seed: i64,
+    #[arg(long)]
     pub language_id: Option<String>,
+    #[arg(long)]
     pub instruction: Option<String>,
+    #[arg(long)]
     pub instruction_schema: Option<String>,
+    #[arg(long)]
     pub speed: Option<String>,
+    #[arg(long)]
     pub pitch: Option<String>,
+    #[arg(long)]
     pub volume: Option<String>,
+    #[arg(long)]
     pub emotion: Option<String>,
+    #[arg(long)]
     pub dialect: Option<String>,
+    #[arg(long)]
     pub style: Option<String>,
+    #[arg(long)]
     pub ip: Option<String>,
+    #[arg(long, default_value_t = 2.0)]
     pub cfg: f64,
+    #[arg(long, default_value_t = 0.25)]
     pub sigma: f64,
+    #[arg(long, default_value_t = 0.0)]
     pub temperature: f64,
+    #[arg(long, default_value_t = 24)]
     pub max_length: usize,
+    #[arg(long, default_value_t = 1000)]
     pub max_decode_steps: usize,
+    #[arg(long, num_args = 1..)]
     pub prompt_wav_path: Vec<String>,
+    #[arg(long)]
     pub prompt_text: Option<String>,
+    #[arg(long, num_args = 1..)]
     pub spk_emb_path: Vec<String>,
+    #[arg(long)]
     pub use_spk_emb: bool,
+    #[arg(long)]
     pub use_zero_spk_emb: bool,
+    #[arg(long)]
     pub no_text_normalization: bool,
+    #[arg(long)]
     pub raw_text: bool,
+    #[arg(long)]
     pub no_trim_silence: bool,
 }
 

@@ -11,7 +11,6 @@
 //! (compressed entries, legacy pre-1.6 pickles, non-tensor payloads) fails with
 //! a message that says what the file actually contains.
 
-#![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -43,6 +42,7 @@ pub struct StorageRef {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // the pickle value model; not every variant is read
 enum Val {
     None,
     Bool(bool),
@@ -92,6 +92,27 @@ impl<'a> Unpickler<'a> {
         }
     }
 
+    fn le_u16(&mut self) -> Result<u16> {
+        let b = self.take(2)?;
+        Ok(u16::from_le_bytes([b[0], b[1]]))
+    }
+
+    fn le_u32(&mut self) -> Result<u32> {
+        let b = self.take(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn le_i32(&mut self) -> Result<i32> {
+        Ok(self.le_u32()? as i32)
+    }
+
+    fn le_f64(&mut self) -> Result<f64> {
+        let b = self.take(8)?;
+        Ok(f64::from_be_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
+    }
+
     fn u8(&mut self) -> Result<u8> {
         let b = *self.data.get(self.pos).context("pickle ended")?;
         self.pos += 1;
@@ -125,10 +146,6 @@ impl<'a> Unpickler<'a> {
         self.stack.pop().context("pickle stack underflow")
     }
 
-    fn top_mut(&mut self) -> Result<&mut Val> {
-        self.stack.last_mut().context("pickle stack empty")
-    }
-
     fn pop_mark(&mut self) -> Result<Vec<Val>> {
         let m = self.marks.pop().context("pickle mark underflow")?;
         if m > self.stack.len() {
@@ -136,10 +153,6 @@ impl<'a> Unpickler<'a> {
         }
         let items = self.stack.split_off(m);
         Ok(items)
-    }
-
-    fn memo_put(&mut self, v: Val) {
-        self.memo.push(Some(v));
     }
 
     /// ("storage", FloatStorage, "0", "cpu", numel) -> a storage reference.
@@ -231,7 +244,7 @@ impl<'a> Unpickler<'a> {
                     self.stack.push(Val::Global(full));
                 }
                 b'X' => {
-                    let n = u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as usize;
+                    let n = self.le_u32()? as usize;
                     let s = String::from_utf8(self.take(n)?.to_vec()).context("pickle string")?;
                     self.stack.push(Val::Str(s));
                 }
@@ -240,11 +253,11 @@ impl<'a> Unpickler<'a> {
                     self.stack.push(Val::Int(v));
                 }
                 b'M' => {
-                    let v = u16::from_le_bytes(self.take(2)?.try_into().unwrap());
+                    let v = self.le_u16()?;
                     self.stack.push(Val::Int(v as i64));
                 }
                 b'J' => {
-                    let v = i32::from_le_bytes(self.take(4)?.try_into().unwrap());
+                    let v = self.le_i32()?;
                     self.stack.push(Val::Int(v as i64));
                 }
                 b'\x8a' => {
@@ -261,7 +274,7 @@ impl<'a> Unpickler<'a> {
                     self.stack.push(Val::Int(v));
                 }
                 b'G' => {
-                    let v = f64::from_be_bytes(self.take(8)?.try_into().unwrap());
+                    let v = self.le_f64()?;
                     self.stack.push(Val::Float(v));
                 }
                 b'(' => self.marks.push(self.stack.len()),
@@ -295,7 +308,7 @@ impl<'a> Unpickler<'a> {
                     self.memo_put_at(idx, v);
                 }
                 b'r' => {
-                    let idx = u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as usize;
+                    let idx = self.le_u32()? as usize;
                     let v = self.stack.last().cloned().context("LONG_BINPUT on empty stack")?;
                     self.memo_put_at(idx, v);
                 }
@@ -305,7 +318,7 @@ impl<'a> Unpickler<'a> {
                     self.stack.push(v);
                 }
                 b'j' => {
-                    let idx = u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as usize;
+                    let idx = self.le_u32()? as usize;
                     let v = self.memo.get(idx).cloned().flatten().context("memo miss")?;
                     self.stack.push(v);
                 }
@@ -392,39 +405,53 @@ struct ZipEntry {
     method: u16,
 }
 
+fn rd_u16(data: &[u8], off: usize) -> Result<u16> {
+    let s = data.get(off..off + 2).context("truncated ZIP field")?;
+    Ok(u16::from_le_bytes([s[0], s[1]]))
+}
+
+fn rd_u32(data: &[u8], off: usize) -> Result<u32> {
+    let s = data.get(off..off + 4).context("truncated ZIP field")?;
+    Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+
 fn read_zip(data: &[u8]) -> Result<Vec<ZipEntry>> {
+    if data.len() < 22 {
+        bail!("not a ZIP file ({} bytes)", data.len());
+    }
     // End of central directory: scan backwards for the signature.
     let mut eocd = None;
-    let mut i = data.len().saturating_sub(22);
-    loop {
+    for i in (0..=data.len() - 22).rev() {
         if data[i..i + 4] == [0x50, 0x4b, 0x05, 0x06] {
             eocd = Some(i);
             break;
         }
-        if i == 0 {
-            break;
-        }
-        i -= 1;
     }
     let eocd = eocd.context("not a ZIP file (no end-of-central-directory)")?;
-    let count = u16::from_le_bytes(data[eocd + 10..eocd + 12].try_into().unwrap()) as usize;
-    let mut cd = u32::from_le_bytes(data[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+    let count = rd_u16(data, eocd + 10)? as usize;
+    let mut cd = rd_u32(data, eocd + 16)? as usize;
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
-        if data[cd..cd + 4] != [0x50, 0x4b, 0x01, 0x02] {
+        if data.get(cd..cd + 4) != Some(&[0x50, 0x4b, 0x01, 0x02]) {
             bail!("bad ZIP central directory");
         }
-        let method = u16::from_le_bytes(data[cd + 10..cd + 12].try_into().unwrap());
-        let size = u32::from_le_bytes(data[cd + 20..cd + 24].try_into().unwrap()) as usize;
-        let name_len = u16::from_le_bytes(data[cd + 28..cd + 30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(data[cd + 30..cd + 32].try_into().unwrap()) as usize;
-        let comment_len = u16::from_le_bytes(data[cd + 32..cd + 34].try_into().unwrap()) as usize;
-        let local = u32::from_le_bytes(data[cd + 42..cd + 46].try_into().unwrap()) as usize;
-        let name = String::from_utf8_lossy(&data[cd + 46..cd + 46 + name_len]).into_owned();
+        let method = rd_u16(data, cd + 10)?;
+        let size = rd_u32(data, cd + 20)? as usize;
+        let name_len = rd_u16(data, cd + 28)? as usize;
+        let extra_len = rd_u16(data, cd + 30)? as usize;
+        let comment_len = rd_u16(data, cd + 32)? as usize;
+        let local = rd_u32(data, cd + 42)? as usize;
+        let name = String::from_utf8_lossy(
+            data.get(cd + 46..cd + 46 + name_len)
+                .context("ZIP entry name is out of bounds")?,
+        )
+        .into_owned();
         // Local header: fixed part 30 bytes + name + extra, then the payload.
-        let l_name = u16::from_le_bytes(data[local + 26..local + 28].try_into().unwrap()) as usize;
-        let l_extra = u16::from_le_bytes(data[local + 28..local + 30].try_into().unwrap()) as usize;
-        let payload = local + 30 + l_name + l_extra;
+        let l_name = rd_u16(data, local + 26)? as usize;
+        let l_extra = rd_u16(data, local + 28)? as usize;
+        let payload = local
+            .checked_add(30 + l_name + l_extra)
+            .context("ZIP local header overflow")?;
         entries.push(ZipEntry {
             name,
             offset: payload,
@@ -519,6 +546,24 @@ fn load_zip_tensor(path: &Path, data: &[u8]) -> Result<Vec<f32>> {
         DType::F64 => 8,
         DType::F16 => 2,
     };
+    // We read the storage linearly, so the tensor must be C-contiguous. A
+    // transposed view saved with torch.save keeps the strides; silently
+    // ignoring them would produce a wrong embedding, so reject it.
+    if !tensor.sizes.is_empty() && !tensor.strides.is_empty() {
+        let mut expected = vec![1u64; tensor.sizes.len()];
+        for i in (0..tensor.sizes.len().saturating_sub(1)).rev() {
+            expected[i] = expected[i + 1] * tensor.sizes[i + 1];
+        }
+        if tensor.strides != expected {
+            bail!(
+                "{} holds a non-contiguous tensor (strides {:?}, expected {:?}); \
+                 call .contiguous() before torch.save",
+                path.display(),
+                tensor.strides,
+                expected
+            );
+        }
+    }
     let numel = if tensor.numel > 0 {
         tensor.numel as usize
     } else {
@@ -532,17 +577,17 @@ fn load_zip_tensor(path: &Path, data: &[u8]) -> Result<Vec<f32>> {
     let mut out = Vec::with_capacity(numel);
     match tensor.dtype {
         DType::F32 => {
-            for c in raw.chunks_exact(4) {
+            for c in raw.as_chunks::<4>().0 {
                 out.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
             }
         }
         DType::F64 => {
-            for c in raw.chunks_exact(8) {
-                out.push(f64::from_le_bytes(c.try_into().unwrap()) as f32);
+            for c in raw.as_chunks::<8>().0 {
+                out.push(f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32);
             }
         }
         DType::F16 => {
-            for c in raw.chunks_exact(2) {
+            for c in raw.as_chunks::<2>().0 {
                 let bits = u16::from_le_bytes([c[0], c[1]]);
                 out.push(half_to_f32(bits));
             }
@@ -579,6 +624,28 @@ fn half_to_f32(bits: u16) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_malformed_files() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("goldens");
+        let path = base.join("spk_tensor.pt");
+        if !path.exists() {
+            return;
+        }
+        let data = std::fs::read(&path).unwrap();
+        for cut in [3usize, 21, 40, data.len() / 2, data.len() - 10] {
+            let truncated = base.join("_truncated.pt");
+            std::fs::write(&truncated, &data[..cut]).unwrap();
+            let err = load_tensor(&truncated).unwrap_err().to_string();
+            assert!(!err.is_empty(), "cut {cut} should fail");
+            let _ = std::fs::remove_file(&truncated);
+        }
+        // A file that is neither ZIP nor pickle.
+        let junk = base.join("_junk.pt");
+        std::fs::write(&junk, b"not a torch file").unwrap();
+        assert!(load_tensor(&junk).is_err());
+        let _ = std::fs::remove_file(&junk);
+    }
 
     #[test]
     fn reads_tensor_and_dict_files() {

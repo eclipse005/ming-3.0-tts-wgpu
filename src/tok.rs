@@ -10,10 +10,9 @@
 
 // Parts of this module are exercised only by the parity tests (they read
 // goldens) or kept as public API; the release binary does not call them.
-#![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // --- Dense (Qwen2-based 0.5b) vocabulary --------------------------------
 pub const DENSE_SYSTEM_PREFIX: &str =
@@ -74,6 +73,8 @@ pub const DENSE: Dialect = Dialect {
     speaker_end: DENSE_SPEAKER_END,
     instruction_eos: DENSE_INSTRUCTION_EOS,
 };
+
+#[cfg(test)]
 
 pub fn dialect(model_type: &str) -> Result<Dialect> {
     if model_type == "dense" {
@@ -136,6 +137,8 @@ impl Tok {
             .with_context(|| format!("token {token:?} is not in the vocabulary"))
     }
 
+    #[cfg(test)]
+
     pub fn vocab_size(&self) -> usize {
         self.tokenizer.get_vocab_size(true)
     }
@@ -188,6 +191,7 @@ pub struct InputSeqArgs<'a> {
 }
 
 impl<'a> InputSeqArgs<'a> {
+    #[cfg(test)]
     pub fn new(prompt: &'a str, text: &'a str) -> Self {
         Self {
             prompt,
@@ -294,23 +298,12 @@ pub fn build_input_ids(tok: &Tok, d: Dialect, args: &InputSeqArgs) -> Result<Inp
     })
 }
 
-/// Default model directory resolution for tests/tools: `MING_MODEL_DIR` first,
-/// then the sibling checkout `<repo>/../Ming-3.0-tts-0.5b`.
-pub fn default_model_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("MING_MODEL_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    let candidate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../Ming-3.0-tts-0.5b");
-    if candidate.join("tokenizer.json").is_file() {
-        Some(candidate)
-    } else {
-        None
-    }
-}
+
 // ---------------------------------------------------------------- tests
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     /// Goldens are written by tools/dump_m5_audio.py from the Python reference.
     #[derive(serde::Deserialize)]
