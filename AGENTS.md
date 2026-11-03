@@ -43,8 +43,9 @@ target\release\ming-tts-wgpu.exe synth ^
 5. **Python 主仓 `D:\Ming-3.0-tts` 是只读参考**，不要改它。
 6. **单次改动后必须跑 `cargo test --release`**；碰到音频相关的改动再跑
    `python tools/check_params_align.py`（需要 videolingo 的 conda 环境；
-   `MING_ALIGN_DEVICE=cpu` 可对拍 CPU 后端）。CPU 与 GPU 都要保持能跑：CPU 侧的
-   条件必须和 `src/pipeline.rs` 的 decode_loop 一致（0.14 修过一个 CFM history 偏差）。
+   `MING_ALIGN_DEVICE=cpu` 可对拍 CPU 后端）。CPU 与 GPU 都要保持能跑：分片编排已经
+   共用 `src/backend.rs`（0.15），但两个 decode 环仍是各自实现，改条件（CFM history、
+   seed、停止判据）必须两边一起改 —— 0.14/0.15 各修过一次漂移。
 
 ## 怎么判断"改对了"
 
@@ -66,18 +67,17 @@ target\release\ming-tts-wgpu.exe synth ^
   分片、克隆（prompt wav 或 `.pt` 说话人向量）、zero-spk、STYLE 首片重条件、中英文本
   规范化（规则层 + FST + inflect 措辞）。唯一没做的是 `infer.py` 本身没暴露的流式。
 - 性能：P104 上 A1（3.2 s 音频）总耗时约 3.0 s（RTF 0.60），Python CUDA Graph 0.782；
-  CPU 后端 RTF ≈ 2.2（原版 Python CPU 4.0–5.3）。这张矿卡热状态会让同一命令差 2.3×，
-  A/B 必须在同一窗口内做。
-- 代码结构：`src/cpu/` 与 GPU 各阶段一一对应；`src/tn/` 是文本规范化移植；
-  `src/pt.rs` 是无 torch 的 `.pt` 读取器。
+  CPU 后端 RTF ≈ 2.2–2.7（解码 + VAE / 音频时长；原版 Python CPU 4.0–5.3）。这张矿卡
+  热状态会让同一命令差 2.3×，A/B 必须在同一窗口内做。
+- 代码结构：`src/backend.rs` 是三条后端共用的分片编排（`Backend` trait + `synthesize`），
+  设备相关的算子留在各自的 `Pipeline` 里；`src/cpu/` 与 GPU 各阶段一一对应；
+  `src/tn/` 是文本规范化移植；`src/pt.rs` 是无 torch 的 `.pt` 读取器。
 
 ## 已知可继续的清理（非功能缺口）
 
-1. `synth.rs` 与 `src/cpu/run.rs` 的分片编排仍是两份（约 120 行重复）。抽 `Backend`
-   trait 可以合并，但需要统一 GPU/CPU 两套 decode_loop 签名，并跑 36 例 + 压力集回归。
-2. `ops.rs` 启动时编译 14 个 GEMV 变体（`MING_T6=base|v8..v14` 等 A/B 口）。性能定稿后
+1. `ops.rs` 启动时编译 14 个 GEMV 变体（`MING_T6=base|v8..v14` 等 A/B 口）。性能定稿后
    可以只留默认赢家；删除前必须在同一热状态下重测 RTF。
-3. `shaders.rs` 的 WGSL 字符串可以按 kernel 家族拆分（1850 行里大部分是生成的
+2. `shaders.rs` 的 WGSL 字符串可以按 kernel 家族拆分（1850 行里大部分是生成的
    `gemv_t6_vec4` 变体）。
 
 A/B 回退口：`MING_T6=base|v8..v14`、`MING_T1=base|half|v1..v4`、`MING_SCRATCH=0`、

@@ -190,20 +190,6 @@ pub struct InputSeqArgs<'a> {
     pub prompt_latent_steps: usize,
 }
 
-impl<'a> InputSeqArgs<'a> {
-    #[cfg(test)]
-    pub fn new(prompt: &'a str, text: &'a str) -> Self {
-        Self {
-            prompt,
-            text,
-            num_speakers: 0,
-            instruction: None,
-            prompt_text: None,
-            prompt_latent_steps: 0,
-        }
-    }
-}
-
 /// The assembled sequence plus the rows the caller must overwrite with
 /// features.
 #[derive(Debug, Clone, PartialEq, Eq)]

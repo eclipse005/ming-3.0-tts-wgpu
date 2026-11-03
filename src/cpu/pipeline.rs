@@ -1,5 +1,8 @@
 //! The CPU decode loop: LLM step, CFM sample, aggregator, and voice
 //! conditioning (prompt encoding, speaker projection).
+//!
+//! Everything here is the host implementation of `crate::backend::Backend`, so
+//! the fragment loop above it is byte-for-byte the one the wgpu path runs.
 
 use anyhow::{bail, Result};
 
@@ -8,6 +11,8 @@ use super::llm::CpuLlm;
 use super::tensor::{CpuLin, Mat};
 use super::vae::{CpuVaeDec, CpuVaeEnc, ENC_IN_DIM, ENC_PATCH};
 use super::ZC;
+use crate::backend::{Backend, Decoded};
+use crate::pipeline::{Noise, SynthParams};
 use crate::qwen_lm::{HIDDEN, KV_CAP};
 use crate::weights::Weights;
 
@@ -31,8 +36,10 @@ impl CpuPipeline {
             embed: Mat::load(w, "model.model.embed_tokens.weight")?,
         })
     }
+}
 
-    pub fn embed_ids(&self, ids: &[u32]) -> Result<Vec<f32>> {
+impl Backend for CpuPipeline {
+    fn embed_ids(&self, ids: &[u32]) -> Result<Vec<f32>> {
         let dim = self.embed.cols;
         let mut out = vec![0.0f32; ids.len() * dim];
         for (i, &id) in ids.iter().enumerate() {
@@ -46,11 +53,28 @@ impl CpuPipeline {
         Ok(out)
     }
 
-    /// Prompt waveform -> posterior sample, exactly like synth.rs: pad to a whole
-    /// encoder patch, encode, then draw eps transposed (torch draws [1,64,T]).
-    pub fn encode_prompt_latent(
+    /// 192-dim CAMPlus embedding -> 896-dim LLM row (spk_head).
+    fn project_speaker(&self, spk192: &[f32]) -> Result<Vec<f32>> {
+        let mut out = vec![0.0f32; HIDDEN];
+        self.spk.linear(spk192, 1, &mut out);
+        Ok(out)
+    }
+
+    /// linear_proj_audio (the DiT aggregator), patch by patch.
+    fn project_latent_rows(&self, latent: &[f32], n: usize) -> Result<Vec<f32>> {
+        let mut rows = Vec::with_capacity(n * HIDDEN);
+        for i in 0..n {
+            rows.extend_from_slice(&self.dit.aggregate(&latent[i * ZC..(i + 1) * ZC]));
+        }
+        Ok(rows)
+    }
+
+    /// Prompt waveform -> posterior sample, exactly like the wgpu path: pad to a
+    /// whole encoder patch, encode, then draw eps transposed (torch draws
+    /// [1,64,T]).
+    fn encode_prompt_latent(
         &self,
-        rng: &mut dyn crate::pipeline::Noise,
+        rng: &mut dyn Noise,
         wav44k: &[f32],
     ) -> Result<(Vec<f32>, usize)> {
         let align = ENC_IN_DIM * ENC_PATCH;
@@ -74,42 +98,26 @@ impl CpuPipeline {
         Ok((latent, n))
     }
 
-    /// linear_proj_audio (the DiT aggregator), patch by patch.
-    pub fn project_latent_rows(&self, latent: &[f32], n: usize) -> Vec<f32> {
-        let mut rows = Vec::with_capacity(n * HIDDEN);
-        for i in 0..n {
-            rows.extend_from_slice(&self.dit.aggregate(&latent[i * ZC..(i + 1) * ZC]));
-        }
-        rows
-    }
-
-    /// 192-dim CAMPlus embedding -> 896-dim LLM row (spk_head).
-    pub fn project_speaker(&self, spk: &[f32]) -> Vec<f32> {
-        let mut out = vec![0.0f32; HIDDEN];
-        self.spk.linear(spk, 1, &mut out);
-        out
-    }
-
     /// The autoregressive loop: LLM step -> CFM sample -> aggregator, until the
     /// stop head fires (same ordering and quirks as pipeline.rs).
-    #[allow(clippy::too_many_arguments)] // numeric knobs mirror the wgpu call
-    pub fn decode_loop(
+    fn decode(
         &mut self,
         embeds: &[f32],
         t: usize,
         prompt_latent: Option<&[f32]>,
         prompt_frames: usize,
-        noise: &mut dyn crate::pipeline::Noise,
-        cfg: f32,
-        sigma: f32,
-        temperature: f32,
-        max_steps: usize,
-    ) -> Result<Vec<f32>> {
+        noise: &mut dyn Noise,
+        p: &SynthParams,
+    ) -> Result<Decoded> {
         let budget = KV_CAP.saturating_sub(t);
         if budget == 0 {
-            bail!("prompt is {t} tokens, no room in the {KV_CAP}-token decode cache");
+            bail!(
+                "prompt is {t} tokens, which leaves no room in the {KV_CAP}-token \
+                 decode cache: split the text (drop --raw_text / lower --max_length) \
+                 or shorten it. The reference silently returns no audio for this input."
+            );
         }
-        let steps = max_steps.min(budget);
+        let steps = p.max_decode_steps.min(budget);
         let (mut z, mut prob) = self.llm.prefill(embeds, t)?;
         // Same conditioning as the wgpu path: the CFM history starts from the
         // prompt's last latent frame, not from silence.
@@ -121,14 +129,16 @@ impl CpuPipeline {
             }
         }
         let mut latents: Vec<f32> = Vec::new();
+        let mut stopped_at = None;
         for (step, pos) in (t..).take(steps).enumerate() {
             let nz = noise.draw(ZC);
             let sde = noise.draw(DIT_STEPS * ZC);
             let lat = self
                 .dit
-                .sample(&z, &history, &nz, &sde, cfg, sigma, temperature);
+                .sample(&z, &history, &nz, &sde, p.cfg, p.sigma, p.temperature);
             latents.extend_from_slice(&lat);
             if prob[1] > 0.5 && step > 3 {
+                stopped_at = Some(step);
                 break;
             }
             let emb = self.dit.aggregate(&lat);
@@ -137,11 +147,10 @@ impl CpuPipeline {
             prob = p2;
             history.copy_from_slice(&lat);
         }
-        Ok(latents)
+        Ok(Decoded { latents, stopped_at })
     }
 
-    pub fn vocode(&self, latents: &[f32]) -> Vec<f32> {
-        let n = latents.len() / ZC;
-        self.dec.decode(latents, n)
+    fn vocode(&self, latents: &[f32], n: usize) -> Result<Vec<f32>> {
+        Ok(self.dec.decode(latents, n))
     }
 }

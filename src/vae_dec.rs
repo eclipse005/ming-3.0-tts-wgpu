@@ -73,18 +73,6 @@ impl VaeDecoder {
         })
     }
 
-    #[cfg(test)]
-
-    pub fn sample_rate(&self) -> usize {
-        44100
-    }
-
-    /// Hop in samples (50 frames per second).
-    #[cfg(test)]
-    pub fn hop(&self) -> usize {
-        882
-    }
-
     fn rms(&self, x: &Buffer, w: &Buffer, rows: usize) -> Buffer {
         self.ops.rms(x, w, rows, HIDDEN)
     }
@@ -216,12 +204,6 @@ impl VaeDecoder {
         self.gpu.read_f32(&o, t * self.head.rows)
     }
 
-    /// torch.nn.Upsample(scale_factor, mode="linear", align_corners=False)
-    /// along the time axis of a [t, ch] row-major tensor.
-    #[cfg(test)]
-    pub fn upsample_from(enc: &[f32], t_in: usize, ch: usize) -> Vec<f32> {
-        linear_upsample(enc, t_in, ch, UPSAMPLE)
-    }
 }
 
 fn linear_upsample(x: &[f32], t_in: usize, ch: usize, scale: usize) -> Vec<f32> {

@@ -8,6 +8,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod audio;
+mod backend;
 mod cpu;
 mod dit;
 mod golden;

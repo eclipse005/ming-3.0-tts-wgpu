@@ -485,7 +485,40 @@ ormalize_text_kit；--no_text_normalization 行为不变。
 CPU 路径一直用零。修复后 CPU 克隆 A3 从 `dur 1.0312 / mel 0.91355 / spk 0.9606` 变成
 **`dur 1.0000 / rel 1.14e-3 / mel 1.00000 / spk 1.0000`**（GPU 基线 2.6e-3）。
 
-## 1. 现状## 1. 现状
+### 0.15 三条后端共用一个分片循环（2026-11-03）
+
+`synth.rs` 与 `cpu/run.rs` 原来各有一份"条件化 → 逐分片解码 → 拼接 → 写盘"（约 120 行
+重复），两份已经漂移过两次（CFM history、STYLE 重条件）。现在合成一处：
+
+- 新增 `src/backend.rs`：`Backend` trait（`embed_ids` / `project_speaker` /
+  `project_latent_rows` / `encode_prompt_latent` / `decode` / `vocode`）+ `Job`（与设备无关
+  的输入）+ `synthesize()`（唯一的编排实现）。GPU 的 `Pipeline` 与 CPU 的 `CpuPipeline`
+  只实现这 6 个算子；`cpu/run.rs`（206 行）删除，CPU 入口变成 `cpu::load()`。
+- 两套 decode 签名统一成 `decode(&SynthParams) -> Decoded { latents, stopped_at }`：
+  GPU 的 `LoopTrace` 留在原地给 parity 测试用，CPU 的 9 个散参数收敛成 `SynthParams`。
+- **顺带修掉第二个漂移**：STYLE 首片重条件之后，GPU 会把新生成的 latent 写回
+  `prompt_latent`（后续分片的 CFM history 种子），CPU 没有 —— 现在共用同一段代码。
+  实测 STYLE 两分片：GPU 与 CPU 的分片数、prompt patches（54）、latents（55 / 43）、
+  总时长（7.60 s）全部一致。
+- CPU 路径白得三个能力：`MING_NOISE_GOLDEN` 金标抽样回放、`MING_DUMP_IDS`、
+  `MING_DUMP_LATENTS`（原来只有 embeds dump）。
+- 归属整理：`trim_trailing_silence` 从 `pipeline.rs` 移到 `audio.rs`（纯音频后处理）；
+  显存三行（`mem load/decode/vae-decode`）由 GPU 后端自己打印，`synthesize` 只打印设备
+  无关的行；`prepare_text` 删掉没用的 `tok` 参数。
+- 验证：80/80（iGPU，235 s）；`cargo build --release`、`cargo clippy --release`、**以及
+  test target** 均零警告（顺手删了 5 个早已没人用的 `#[cfg(test)]` helper）。
+  改造前后用同一命令对拍：GPU 与 CPU 的 A1 输出**逐字节一致**（仅 WAV 的 PEAK 时间戳
+  两字节不同），CPU 解码耗时 8.5–8.7 s（旧）/ 9.4 s（新），在本机噪声范围内。
+- 分片路径另外单独对拍过（这是本重构真正动的部分）：用 63b53b4 与本次二进制跑同样的
+  多分片输入，**S4（2 片）/ S5（6 片）输出逐字节一致**，每片 latents 数与 stopped_at
+  也一致（49+61、43/67/51/49/32/33）。
+- `stress_compare.py` 全对拍今天**没有复现**：参考侧缺 flash-attn、两个注意力 pin 退回
+  SDPA（模型加载时的提示），参考的停止头对 S4/S5/S6/S10 不再触发，渲出 74.1 s / 202.9 s /
+  28.0 s / 35.7 s 的连续语音（同一段 ZH60 单片的 S3 只有 8.7 s）；Rust 侧时长与 11-01
+  记录的基线完全一致（S5 = 21.6 s / 6 片）。按 4.4 的混沌结论，这是参考侧轨迹分岔，不是
+  移植侧回归；等环境恢复 flash-attn 后应重跑一次对拍再更新本节的 rel/mel 数字。
+
+## 1. 现状
 
 | 验收项 | 状态 | 证据 |
 |---|---|---|

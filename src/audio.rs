@@ -257,6 +257,35 @@ fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
     a
 }
 
+/// Trim trailing silence exactly like `ming_tts.trim_trailing_silence`.
+pub fn trim_trailing_silence(speech: &[f32], sample_rate: u32) -> Vec<f32> {
+    let sample_rate = sample_rate as usize;
+    let frame = sample_rate / 10;
+    let tail = sample_rate * 3 / 10;
+    if frame == 0 || speech.len() < frame {
+        return speech[..speech.len().min(tail)].to_vec();
+    }
+    // The reference first truncates to a whole number of 0.1 s frames and only
+    // then slices the tail off that truncated signal; slicing the original
+    // length instead leaves the partial frame in place.
+    let num_frames = (speech.len() - frame) / frame + 1;
+    let body = &speech[..num_frames * frame];
+    let mut scores = vec![0f32; num_frames];
+    for (i, s) in scores.iter_mut().enumerate() {
+        let seg = &body[i * frame..(i + 1) * frame];
+        *s = seg.iter().map(|v| v.abs()).sum::<f32>() / frame as f32;
+    }
+    let mut index = num_frames as isize - 1;
+    while index >= 0 && scores[index as usize] <= 1e-3 {
+        index -= 1;
+    }
+    if index < 0 {
+        return body[..body.len().min(tail)].to_vec();
+    }
+    let end = (index as usize * frame + frame + tail).min(body.len());
+    body[..end].to_vec()
+}
+
 // ---------------------------------------------------------------- tests
 #[cfg(test)]
 mod tests {

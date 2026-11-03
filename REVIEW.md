@@ -55,6 +55,8 @@ goldens 只能保证"跑得对"，保证不了"改一处只影响一处"。这�
 - 环境变量开关分散（`MING_NOISE_GOLDEN` / `MING_PROFILE` / `MING_MAX_PENDING` /
   `MING_KV_TRACE` / `MING_STEPS` / `MING_GOLDEN` / `MING_MODEL`），没有集中说明。
 - `synth.rs` 在一个文件里做了"参数→request、音色条件、分片循环、写盘"四件事。
+  （**0.15 已解决**：条件化 / 分片循环 / 写盘搬到 `src/backend.rs`，`synth.rs` 只留
+  参数面与文本分片；GPU 与手写 CPU 后端实现同一个 `Backend` trait。）
 
 ## 二、本轮已做的重构
 

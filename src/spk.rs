@@ -411,14 +411,6 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("goldens").join("m5_audio")
     }
 
-    fn repo_file(rel: &str) -> String {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(rel)
-            .to_string_lossy()
-            .to_string()
-    }
-
     fn read_f32(name: &str) -> Vec<f32> {
         let path = goldens_dir().join(name);
         let bytes = std::fs::read(&path)

@@ -119,13 +119,6 @@ impl Weights {
     }
 
     #[cfg(test)]
-
-    pub fn contains(&self, name: &str) -> bool {
-        self.map.contains_key(name)
-    }
-
-    #[cfg(test)]
-
     pub fn names_matching(&self, pat: &str) -> Vec<&String> {
         let mut v: Vec<&String> = self
             .map

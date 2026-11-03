@@ -13,7 +13,7 @@ use crate::vae::VaeEncoder;
 use crate::vae_dec::VaeDecoder;
 use crate::weights::{bf16_widen, Weights};
 use wgpu::Buffer;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 
 pub const LATENT_DIM: usize = 64;
@@ -123,6 +123,9 @@ pub struct LoopTrace {
     #[allow(dead_code)]
     pub stop_probs: Vec<f32>,
     pub latents: Vec<f32>,
+    /// `latents.len() / LATENT_DIM`; read by the parity test, the CLI counts its
+    /// own (it only sees `Decoded`).
+    #[allow(dead_code)]
     pub n_latents: usize,
     pub stopped_at: Option<usize>,
 }
@@ -209,6 +212,7 @@ impl Pipeline {
         p: &SynthParams,
     ) -> Result<LoopTrace> {
         let t_pre = std::time::Instant::now();
+        let mem_before = self.gpu.mem_stats().0;
         let (mut z, mut prob) = self.llm.prefill_full(embeds, t)?;
         nan_report("prefill.z", &z);
         let prefill = t_pre.elapsed();
@@ -235,7 +239,8 @@ impl Pipeline {
         let budget = MAX_CACHE_LEN.saturating_sub(t) / PATCH.max(1);
         if budget == 0 {
             bail!(
-                "prompt is {t} tokens, which leaves no room in the {MAX_CACHE_LEN}-token                  decode cache: split the text (drop --raw_text / lower --max_length) or \
+                "prompt is {t} tokens, which leaves no room in the {MAX_CACHE_LEN}-token \
+                 decode cache: split the text (drop --raw_text / lower --max_length) or \
                  shorten it. The reference silently returns no audio for this input."
             );
         }
@@ -286,16 +291,18 @@ impl Pipeline {
         }
 
         let n_latents = latents.len() / LATENT_DIM;
-        // MING_DUMP_LATENTS=<path>: raw little-endian f32, [n_latents, 64].
-        // Same idea as MING_DUMP_IDS -- it is how a step-by-step comparison
-        // against the reference's sampled_token_latent is done.
-        if let Ok(path) = std::env::var("MING_DUMP_LATENTS") {
-            let mut bytes = Vec::with_capacity(latents.len() * 4);
-            for v in &latents {
-                bytes.extend_from_slice(&v.to_le_bytes());
-            }
-            std::fs::write(&path, &bytes)?;
-            println!("latents -> {path} ({n_latents} x {LATENT_DIM})");
+        if std::env::var("MING_MEM").is_ok() {
+            let (cum, peak) = self.gpu.mem_stats();
+            let (nb, nd) = self.gpu.counters();
+            println!(
+                "  mem decode    : {:.1} MiB in {} buffers, {} dispatches for {} latents, \
+                 peak window {:.1} MiB",
+                (cum - mem_before) as f64 / 1048576.0,
+                nb,
+                nd,
+                n_latents,
+                peak as f64 / 1048576.0
+            );
         }
         if std::env::var("MING_PROFILE").is_ok() {
             println!(
@@ -314,34 +321,101 @@ impl Pipeline {
 
     /// Latents [n, 64] -> waveform at 44.1 kHz.
     pub fn vocode(&self, latents: &[f32], n: usize) -> Result<Vec<f32>> {
-        self.dec.decode(latents, n)
+        let before = self.gpu.mem_stats().0;
+        let wav = self.dec.decode(latents, n)?;
+        if std::env::var("MING_MEM").is_ok() {
+            let (cum, peak) = self.gpu.mem_stats();
+            println!(
+                "  mem vae-decode: {:.1} MiB allocated for {} frames, peak window {:.1} MiB",
+                (cum - before) as f64 / 1048576.0,
+                n * PATCH,
+                peak as f64 / 1048576.0
+            );
+        }
+        Ok(wav)
     }
 
-    /// Trim trailing silence exactly like ming_tts.trim_trailing_silence.
-    pub fn trim_trailing_silence(speech: &[f32], sample_rate: usize) -> Vec<f32> {
-        let frame = sample_rate / 10;
-        let tail = sample_rate * 3 / 10;
-        if frame == 0 || speech.len() < frame {
-            return speech[..speech.len().min(tail)].to_vec();
+    /// Project a whole prompt latent, patch by patch (linear_proj_audio).
+    pub fn project_latent_rows(&self, latent: &[f32], n: usize) -> Result<Vec<f32>> {
+        let mut rows = Vec::with_capacity(n * LATENT_DIM);
+        for i in 0..n {
+            rows.extend_from_slice(&self.project_latent(&latent[i * LATENT_DIM..(i + 1) * LATENT_DIM])?);
         }
-        // The reference first truncates to a whole number of 0.1 s frames and
-        // only then slices the tail off that truncated signal; slicing the
-        // original length instead leaves the partial frame in place.
-        let num_frames = (speech.len() - frame) / frame + 1;
-        let body = &speech[..num_frames * frame];
-        let mut scores = vec![0f32; num_frames];
-        for (i, s) in scores.iter_mut().enumerate() {
-            let seg = &body[i * frame..(i + 1) * frame];
-            *s = seg.iter().map(|v| v.abs()).sum::<f32>() / frame as f32;
+        Ok(rows)
+    }
+
+    /// Encode a 44.1 kHz waveform into a prompt latent, exactly like
+    /// encode_prompt_latent: front-pad to a whole patch, run the VAE encoder,
+    /// then draw the posterior sample with the reference's RNG (torch draws
+    /// [1,64,T] while our mean/std are [T,64], so the flat draw is transposed).
+    pub fn encode_prompt_latent(
+        &self,
+        rng: &mut dyn Noise,
+        wav44k: &[f32],
+    ) -> Result<(Vec<f32>, usize)> {
+        let align = 882 * 4; // hop * encoder patch size * ditar patch size
+        let mut all = wav44k.to_vec();
+        let rem = all.len() % align;
+        if rem != 0 {
+            let mut padded = vec![0f32; all.len() + align - rem];
+            padded[align - rem..].copy_from_slice(&all);
+            all = padded;
         }
-        let mut index = num_frames as isize - 1;
-        while index >= 0 && scores[index as usize] <= 1e-3 {
-            index -= 1;
+        let enc = self.enc.as_ref().context("pipeline loaded without the VAE encoder")?;
+        let (mean, std, n_patch) = enc.encode_params(&all)?;
+        let frames = mean.len() / LATENT_DIM;
+        let raw = rng.draw(LATENT_DIM * frames);
+        let mut latent = vec![0f32; mean.len()];
+        for t in 0..frames {
+            for c in 0..LATENT_DIM {
+                let i = t * LATENT_DIM + c;
+                latent[i] = mean[i] + std[i] * raw[c * frames + t];
+            }
         }
-        if index < 0 {
-            return body[..body.len().min(tail)].to_vec();
-        }
-        let end = (index as usize * frame + frame + tail).min(body.len());
-        body[..end].to_vec()
+        Ok((latent, n_patch))
+    }
+}
+
+/// The CLI drives every device through this trait; `pipeline::Pipeline` is the
+/// wgpu half (see `crate::backend`).
+impl crate::backend::Backend for Pipeline {
+    fn embed_ids(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        Pipeline::embed_ids(self, ids)
+    }
+
+    fn project_speaker(&self, spk192: &[f32]) -> Result<Vec<f32>> {
+        Pipeline::project_speaker(self, spk192)
+    }
+
+    fn project_latent_rows(&self, latent: &[f32], n: usize) -> Result<Vec<f32>> {
+        Pipeline::project_latent_rows(self, latent, n)
+    }
+
+    fn encode_prompt_latent(
+        &self,
+        rng: &mut dyn Noise,
+        wav44k: &[f32],
+    ) -> Result<(Vec<f32>, usize)> {
+        Pipeline::encode_prompt_latent(self, rng, wav44k)
+    }
+
+    fn decode(
+        &mut self,
+        embeds: &[f32],
+        t: usize,
+        prompt_latent: Option<&[f32]>,
+        prompt_frames: usize,
+        noise: &mut dyn Noise,
+        params: &SynthParams,
+    ) -> Result<crate::backend::Decoded> {
+        let trace = Pipeline::decode_loop(self, embeds, t, prompt_latent, prompt_frames, noise, params)?;
+        Ok(crate::backend::Decoded {
+            latents: trace.latents,
+            stopped_at: trace.stopped_at,
+        })
+    }
+
+    fn vocode(&self, latents: &[f32], n: usize) -> Result<Vec<f32>> {
+        Pipeline::vocode(self, latents, n)
     }
 }
