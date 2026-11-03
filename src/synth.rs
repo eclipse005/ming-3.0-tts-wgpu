@@ -303,6 +303,15 @@ pub fn run(a: Args) -> Result<()> {
         }
 
         let t = layout.input_ids.len();
+        if let Ok(path) = std::env::var("MING_DUMP_EMBEDS") {
+            let path = format!("{path}.{index}.f32");
+            let mut bytes = Vec::with_capacity(embeds.len() * 4);
+            for v in &embeds {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            std::fs::write(&path, &bytes)?;
+            println!("embeds -> {path} ({t} x 896)");
+        }
         let t0 = std::time::Instant::now();
         let before = pl.gpu.mem_stats().0;
         let trace = pl.decode_loop(

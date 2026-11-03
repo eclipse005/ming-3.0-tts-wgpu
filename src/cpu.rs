@@ -1057,6 +1057,8 @@ pub struct CpuPipeline {
     pub llm: CpuLlm,
     pub dit: CpuDit,
     pub dec: CpuVaeDec,
+    pub enc: CpuVaeEnc,
+    spk: CpuLin,
     embed: Mat,
 }
 
@@ -1066,6 +1068,8 @@ impl CpuPipeline {
             llm: CpuLlm::load(w)?,
             dit: CpuDit::load(w)?,
             dec: CpuVaeDec::load(w)?,
+            enc: CpuVaeEnc::load(w)?,
+            spk: CpuLin::load(w, "spk_head", HIDDEN, 192)?,
             embed: Mat::load(w, "model.model.embed_tokens.weight")?,
         })
     }
@@ -1082,6 +1086,50 @@ impl CpuPipeline {
                 .copy_from_slice(&self.embed.data[id * dim..(id + 1) * dim]);
         }
         Ok(out)
+    }
+
+    /// Prompt waveform -> posterior sample, exactly like synth.rs: pad to a whole
+    /// encoder patch, encode, then draw eps transposed (torch draws [1,64,T]).
+    pub fn encode_prompt_latent(
+        &self,
+        rng: &mut dyn crate::pipeline::Noise,
+        wav44k: &[f32],
+    ) -> Result<(Vec<f32>, usize)> {
+        let align = ENC_IN_DIM * ENC_PATCH;
+        let mut all = wav44k.to_vec();
+        let rem = all.len() % align;
+        if rem != 0 {
+            let mut padded = vec![0f32; all.len() + align - rem];
+            padded[align - rem..].copy_from_slice(&all);
+            all = padded;
+        }
+        let (mean, std, n) = self.enc.encode_params(&all)?;
+        let frames = mean.len() / ZC;
+        let raw = rng.draw(ZC * frames);
+        let mut latent = vec![0f32; mean.len()];
+        for t in 0..frames {
+            for c in 0..ZC {
+                let i = t * ZC + c;
+                latent[i] = mean[i] + std[i] * raw[c * frames + t];
+            }
+        }
+        Ok((latent, n))
+    }
+
+    /// linear_proj_audio (the DiT aggregator), patch by patch.
+    pub fn project_latent_rows(&self, latent: &[f32], n: usize) -> Vec<f32> {
+        let mut rows = Vec::with_capacity(n * HIDDEN);
+        for i in 0..n {
+            rows.extend_from_slice(&self.dit.aggregate(&latent[i * ZC..(i + 1) * ZC]));
+        }
+        rows
+    }
+
+    /// 192-dim CAMPlus embedding -> 896-dim LLM row (spk_head).
+    pub fn project_speaker(&self, spk: &[f32]) -> Vec<f32> {
+        let mut out = vec![0.0f32; HIDDEN];
+        self.spk.linear(spk, 1, &mut out);
+        out
     }
 
     /// The autoregressive loop: LLM step -> CFM sample -> aggregator, until the
@@ -1136,12 +1184,6 @@ impl CpuPipeline {
 /// producing the wrong voice.
 pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
     use crate::tasks;
-    if !a.prompt_wav_path.is_empty() || a.use_spk_emb || a.use_zero_spk_emb {
-        bail!(
-            "--device cpu does not implement voice conditioning yet (it needs the CPU VAE \
-             encoder). Run without --prompt_wav_path/--use_spk_emb, or use cuda:0/igpu."
-        );
-    }
     let tok = crate::tok::Tok::load(model_dir)?;
     let controls = None;
     let req = tasks::build_task_generation_kwargs(
@@ -1151,7 +1193,7 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
         a.instruction.as_deref(),
         controls,
         a.instruction_schema.as_deref(),
-        None,
+        a.prompt_wav_path.first().map(|s| s.as_str()),
         a.prompt_text.as_deref(),
         None,
         a.use_spk_emb,
@@ -1161,6 +1203,12 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
         a.temperature,
     )?;
     let fragments = crate::synth::prepare_text(&tok, &req, a)?;
+    if req.taskname == "STYLE" && fragments.len() > 1 {
+        bail!(
+            "--device cpu does not implement STYLE re-conditioning on the first fragment yet; \
+             use cuda:0/igpu for multi-fragment STYLE."
+        );
+    }
     let mut rng: Box<dyn crate::pipeline::Noise> = Box::new(crate::pipeline::Torch::new(a.seed));
 
     println!("device: cpu (hand-written Rust backend, rayon)");
@@ -1170,6 +1218,48 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
     let mut pl = CpuPipeline::load(&w)?;
     println!("  model loaded in {:?}", t0.elapsed());
 
+    // ---- voice conditioning (same rules as synth.rs) ----------------------
+    let mut spk_row: Option<Vec<f32>> = None;
+    let mut prompt_latent: Option<(Vec<f32>, usize)> = None;
+    let mut prompt_text = req.prompt_text.clone();
+    if a.use_zero_spk_emb {
+        spk_row = Some(vec![0.0f32; HIDDEN]);
+    }
+    if !a.prompt_wav_path.is_empty() {
+        let mut at_44k: Vec<f32> = Vec::new();
+        let mut for_spk: Vec<f32> = Vec::new();
+        for path in &a.prompt_wav_path {
+            let (x, r) = crate::audio::read_wav(path)?;
+            if a.use_spk_emb {
+                for_spk.extend_from_slice(&if r != 16000 {
+                    crate::audio::resample(&x, r, 16000)
+                } else {
+                    x.clone()
+                });
+            }
+            at_44k.extend_from_slice(&if r != 44100 {
+                crate::audio::resample(&x, r, 44100)
+            } else {
+                x
+            });
+        }
+        if a.use_spk_emb && spk_row.is_none() {
+            let onnx = model_dir.join("campplus.onnx");
+            let emb = crate::spk::embed_16k_with(&onnx, &for_spk)?;
+            spk_row = Some(pl.project_speaker(&emb));
+        }
+        if req.prompt_text.is_some() {
+            prompt_latent = Some(pl.encode_prompt_latent(&mut *rng, &at_44k)?);
+        }
+    }
+    if prompt_latent.is_none() {
+        prompt_text = None;
+    }
+    let latent_rows = prompt_latent
+        .as_ref()
+        .map(|(lat, n)| pl.project_latent_rows(lat, *n));
+    let latent_steps = prompt_latent.as_ref().map_or(0, |(_, n)| *n);
+
     let mut out: Vec<f32> = Vec::new();
     for (index, fragment) in fragments.iter().enumerate() {
         let layout = crate::tok::build_input_ids(
@@ -1178,13 +1268,30 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
             &crate::tok::InputSeqArgs {
                 prompt: &req.prompt,
                 text: fragment,
-                num_speakers: 0,
+                num_speakers: spk_row.is_some() as usize,
                 instruction: req.instruction.as_deref(),
-                prompt_text: None,
-                prompt_latent_steps: 0,
+                prompt_text: if latent_rows.is_some() { prompt_text.as_deref() } else { None },
+                prompt_latent_steps: latent_steps,
             },
         )?;
-        let embeds = pl.embed_ids(&layout.input_ids)?;
+        let mut embeds = pl.embed_ids(&layout.input_ids)?;
+        if let Some(se) = &spk_row {
+            let pos = layout.speaker_positions[0];
+            embeds[pos * HIDDEN..(pos + 1) * HIDDEN].copy_from_slice(&se[..]);
+        }
+        if let Some(rows) = &latent_rows {
+            let start = layout.latent_position as usize;
+            embeds[start * HIDDEN..(start + latent_steps) * HIDDEN].copy_from_slice(rows);
+        }
+        if let Ok(path) = std::env::var("MING_DUMP_EMBEDS") {
+            let path = format!("{path}.{index}.f32");
+            let mut bytes = Vec::with_capacity(embeds.len() * 4);
+            for v in &embeds {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            std::fs::write(&path, &bytes)?;
+            println!("embeds -> {path} ({} x 896)", layout.input_ids.len());
+        }
         let t = layout.input_ids.len();
         let t1 = std::time::Instant::now();
         let latents = pl.decode_loop(
@@ -1218,4 +1325,151 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
         out.len() as f64 / 44100.0
     );
     Ok(())
+}
+
+
+// ---------------------------------------------------------------------------
+// VAE encoder (hand-written twin of vae.rs): waveform -> posterior params
+// ---------------------------------------------------------------------------
+
+pub const ENC_LAYERS: usize = 24;
+pub const AGG_LAYERS: usize = 4;
+pub const ENC_PATCH: usize = 4;
+pub const ENC_IN_DIM: usize = 882;
+
+pub struct CpuVaeEnc {
+    fc1: CpuLin,
+    fc2: CpuLin,
+    enc: Vec<CpuQwenLayer>,
+    agg: Vec<CpuQwenLayer>,
+    cls: Vec<f32>,
+    enc_norm: Vec<f32>,
+    agg_norm: Vec<f32>,
+    fc3: CpuLin,
+}
+
+impl CpuVaeEnc {
+    pub fn load(w: &Weights) -> Result<Self> {
+        let enc = (0..ENC_LAYERS)
+            .map(|i| CpuQwenLayer::load(w, &format!("audio.encoder.encoder.layers.{i}")))
+            .collect::<Result<Vec<_>>>()?;
+        let agg = (0..AGG_LAYERS)
+            .map(|i| CpuQwenLayer::load(w, &format!("audio.encoder.aggregator.layers.{i}")))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            fc1: CpuLin::load(w, "audio.encoder.fc1", HIDDEN, ENC_IN_DIM)?,
+            fc2: CpuLin::load(w, "audio.encoder.fc2", HIDDEN, HIDDEN)?,
+            enc,
+            agg,
+            cls: w.get("audio.encoder.cls_embed")?.to_f32()?,
+            enc_norm: w.get("audio.encoder.encoder.norm.weight")?.to_f32()?,
+            agg_norm: w.get("audio.encoder.aggregator.norm.weight")?.to_f32()?,
+            fc3: CpuLin::load(w, "audio.encoder.fc3", 128, HIDDEN)?,
+        })
+    }
+
+    fn stack(&self, layers: &[CpuQwenLayer], x: &[f32], t: usize) -> Vec<f32> {
+        let mut h = x.to_vec();
+        let mut a = vec![0.0f32; t * HIDDEN];
+        let mut q = vec![0.0f32; t * HIDDEN];
+        let mut k = vec![0.0f32; t * KV_HEADS * HEAD_DIM];
+        let mut v = vec![0.0f32; t * KV_HEADS * HEAD_DIM];
+        let mut attn = vec![0.0f32; t * HIDDEN];
+        let mut o = vec![0.0f32; t * HIDDEN];
+        let mut gate = vec![0.0f32; t * MLP_DIM];
+        let mut up = vec![0.0f32; t * MLP_DIM];
+        let mut sil = vec![0.0f32; t * MLP_DIM];
+        let mut a2 = vec![0.0f32; t * HIDDEN];
+        let mut kc = vec![0.0f32; KV_HEADS * t * HEAD_DIM];
+        let mut vc = vec![0.0f32; KV_HEADS * t * HEAD_DIM];
+        let mut inv_freq = vec![0.0f32; HEAD_DIM / 2];
+        for (i, f) in inv_freq.iter_mut().enumerate() {
+            *f = ROPE_THETA.powf((2 * i) as f64 / HEAD_DIM as f64).recip() as f32;
+        }
+        for l in layers {
+            rmsnorm(&h, &l.n1, t, HIDDEN, &mut a);
+            l.q.linear(&a, t, &mut q);
+            l.k.linear(&a, t, &mut k);
+            l.v.linear(&a, t, &mut v);
+            rope_split_half(&mut q, &inv_freq, Q_HEADS, 0, t);
+            rope_split_half(&mut k, &inv_freq, KV_HEADS, 0, t);
+            for tt in 0..t {
+                for hh in 0..KV_HEADS {
+                    let dst = hh * t * HEAD_DIM + tt * HEAD_DIM;
+                    let src = (tt * KV_HEADS + hh) * HEAD_DIM;
+                    kc[dst..dst + HEAD_DIM].copy_from_slice(&k[src..src + HEAD_DIM]);
+                    vc[dst..dst + HEAD_DIM].copy_from_slice(&v[src..src + HEAD_DIM]);
+                }
+            }
+            attention_window(&q, &kc, &vc, t, 0, Q_HEADS, KV_HEADS, VAE_WINDOW, t, &mut attn);
+            l.o.linear(&attn, t, &mut o);
+            add_into(&mut h, &o);
+            rmsnorm(&h, &l.n2, t, HIDDEN, &mut a2);
+            l.gate.linear(&a2, t, &mut gate);
+            l.up.linear(&a2, t, &mut up);
+            silu_mul(&gate, &up, &mut sil);
+            l.down.linear(&sil, t, &mut o);
+            add_into(&mut h, &o);
+        }
+        h
+    }
+
+    /// waveform (44.1 kHz, already padded) -> (mean, std, n_patch), each patch
+    /// is 64 channels.
+    pub fn encode_params(&self, waveform: &[f32]) -> Result<(Vec<f32>, Vec<f32>, usize)> {
+        let n = waveform.len();
+        let t_frames = n.div_ceil(ENC_IN_DIM);
+        let mut frames = vec![0.0f32; t_frames * ENC_IN_DIM];
+        for t in 0..t_frames {
+            let start = t * ENC_IN_DIM;
+            let end = (start + ENC_IN_DIM).min(n);
+            frames[t * ENC_IN_DIM..t * ENC_IN_DIM + (end - start)]
+                .copy_from_slice(&waveform[start..end]);
+        }
+        let mut e1 = vec![0.0f32; t_frames * HIDDEN];
+        self.fc1.linear(&frames, t_frames, &mut e1);
+        let mut e2 = vec![0.0f32; t_frames * HIDDEN];
+        self.fc2.linear(&e1, t_frames, &mut e2);
+        let h_raw = self.stack(&self.enc, &e2, t_frames);
+        let mut h = vec![0.0f32; t_frames * HIDDEN];
+        rmsnorm(&h_raw, &self.enc_norm, t_frames, HIDDEN, &mut h);
+
+        // patch + cls frontend: row 5p+4 is the learned cls embedding
+        let p_count = t_frames.div_ceil(ENC_PATCH);
+        let padded = p_count * ENC_PATCH;
+        let mut seq = vec![0.0f32; padded * 5 * HIDDEN];
+        for p in 0..p_count {
+            for f in 0..ENC_PATCH {
+                let src = p * ENC_PATCH + f;
+                if src < t_frames {
+                    let dst = (p * 5 + f) * HIDDEN;
+                    seq[dst..dst + HIDDEN].copy_from_slice(&h[src * HIDDEN..(src + 1) * HIDDEN]);
+                }
+            }
+            let dst = (p * 5 + 4) * HIDDEN;
+            seq[dst..dst + HIDDEN].copy_from_slice(&self.cls);
+        }
+        let a_raw = self.stack(&self.agg, &seq, p_count * 5);
+        let mut a = vec![0.0f32; p_count * 5 * HIDDEN];
+        rmsnorm(&a_raw, &self.agg_norm, p_count * 5, HIDDEN, &mut a);
+        let mut cls_rows = vec![0.0f32; p_count * HIDDEN];
+        for p in 0..p_count {
+            let src = (p * 5 + 4) * HIDDEN;
+            cls_rows[p * HIDDEN..(p + 1) * HIDDEN].copy_from_slice(&a[src..src + HIDDEN]);
+        }
+        let mut out = vec![0.0f32; p_count * 128];
+        self.fc3.linear(&cls_rows, p_count, &mut out);
+        let mut mean = vec![0.0f32; p_count * ZC];
+        let mut std = vec![0.0f32; p_count * ZC];
+        for i in 0..p_count * ZC {
+            let row = i / ZC;
+            let ch = i % ZC;
+            mean[i] = out[row * 128 + ch];
+            let scale = out[row * 128 + ZC + ch];
+            // diffusers OobleckDiagonalGaussianDistribution: softplus + 1e-4
+            let sp = if scale > 20.0 { scale } else { (scale.exp() + 1.0).ln() };
+            std[i] = sp + 1e-4;
+        }
+        Ok((mean, std, p_count))
+    }
 }

@@ -343,7 +343,9 @@ dGPU 上一律是 35/36（F2 例外），A4/I4 另属 cache-free 参考口径（
 f32 激活 + bf16 权重加载时展宽 + rayon 行并行 + 手写分块 GEMM，没有 NN 框架、不碰 wgpu。
 
 覆盖：Qwen2.5-0.5B（prefill + 增量解码 + stop head）、DiT+CFM（8 block、CFG 合批、10 步
-Euler）、aggregator、VAE 解码器（24 层因果滑窗 64 + iSTFT）。
+Euler）、aggregator、VAE 解码器（24 层因果滑窗 64 + iSTFT）、VAE 编码器（24 层 + patch/cls
++ 4 层 aggregator + fc3 → mean/std）、spk_head，以及克隆条件（prompt 编码 + 后验抽样 +
+linear_proj_audio 逐 patch 投影）。
 
 逐模块对拍（全部对着 Python 金标，CPU 与 GPU 同为 1e-6 量级）：
 
@@ -353,13 +355,17 @@ Euler）、aggregator、VAE 解码器（24 层因果滑窗 64 + iSTFT）。
 | DiT block0 逐算子 | **2.2e-7 – 9.0e-7** | 2e-6 |
 | CFM 41 步 worst | **4.92e-6** | 1e-5 |
 | VAE 解码波形 | **2.39e-6** | 1e-4 |
+| VAE 编码 mean / std(abs) / latent | **1.35e-6 / 6.8e-8 / 1.35e-6** | 1e-4 |
+| 克隆条件 embeds（CPU vs GPU） | **2.0e-6**（最差行 1.1e-5） | — |
 | 端到端 A1（对 params_test 参考） | 时长 1.0000、rel 1.79e-4、**log-mel 1.000000** | — |
+| 端到端 A3 克隆（对参考） | 时长 1.0312、mel 0.9136、音色 cos 0.9606 —— 条件已对齐到 2e-6，
+但 40 步自回归把 2e-6 放大成另一条合法轨迹（4.4 的混沌类） | — |
 
 性能（Ultra 7 265K，20 核）：3.2 s 音频 **模型加载 3.0 s + 解码 6.28 s + VAE 0.69 s ≈ 7.0 s
 （RTF 2.2）**；同一句 Python CPU 是 **12.8–16.3 s（RTF 4.0–5.3）**，即 CPU 路径约 **2× 于原版**。
 
-还没做：**VAE 编码器**（prompt/克隆条件）——--device cpu 带 --prompt_wav_path/--use_spk_emb
-会明确报错而不是给错音色；STYLE 的首片重条件同理。
+还没做：**STYLE 多分片的首片重条件**（要用生成音频再编码一次）——--device cpu 遇到
+STYLE 且 >1 片会明确报错；单分片和普通 TTS/克隆都已可用。
 
 ## 1. 现状
 

@@ -312,6 +312,44 @@ mod cpu_dit_forward_tests {
 }
 
 #[cfg(test)]
+mod cpu_vae_enc_tests {
+    use super::*;
+    use crate::cpu::CpuVaeEnc;
+    use crate::weights::Weights;
+
+    #[test]
+    fn cpu_vae_encoder_matches_python() {
+        let wf = golden("m3_waveform.npy").unwrap();
+        let mean = golden("m3_mean.npy").unwrap();
+        let std = golden("m3_std.npy").unwrap();
+        let eps = golden("m3_eps.npy").unwrap();
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let enc = CpuVaeEnc::load(&weights).unwrap();
+        let (gm, gs, p) = enc.encode_params(&wf.data).unwrap();
+        println!(
+            "cpu patches={p} mean rel_l2={:.3e} std rel_l2={:.3e}",
+            rel_l2(&gm, &mean.data),
+            rel_l2(&gs, &std.data)
+        );
+        let latent = golden("m3_latent.npy").unwrap();
+        assert_eq!(p, mean.shape[0]);
+        assert!(rel_l2(&gm, &mean.data) < 1e-4);
+        let std_abs = gs
+            .iter()
+            .zip(std.data.iter())
+            .fold(0f32, |a, (x, y)| a.max((x - y).abs()));
+        println!("cpu std worst abs = {std_abs:.3e}");
+        assert!(std_abs < 1e-6);
+        let mut lat = vec![0f32; gm.len()];
+        for i in 0..gm.len() {
+            lat[i] = gm[i] + gs[i] * eps.data[i];
+        }
+        println!("cpu latent rel_l2={:.3e}", rel_l2(&lat, &latent.data));
+        assert!(rel_l2(&lat, &latent.data) < 1e-4);
+    }
+}
+
+#[cfg(test)]
 mod cpu_vae_tests {
     use super::*;
     use crate::cpu::CpuVaeDec;
