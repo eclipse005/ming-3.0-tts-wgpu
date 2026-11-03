@@ -9,7 +9,7 @@
 ```bat
 cd D:\Ming-3.0-tts\wgpu
 cargo build --release
-cargo test --release -- --test-threads=1        :: 64 个测试，约 155 s，需要 GPU
+cargo test --release -- --test-threads=1        :: 80 个测试，约 230 s，需要 GPU
 ```
 
 单条合成（参数面与 Python 的 `infer.py` 逐字一致）：
@@ -21,8 +21,10 @@ target\release\ming-tts-wgpu.exe synth ^
   --output D:/Ming-3.0-tts/output/rust/A1_bare.wav --no_text_normalization
 ```
 
+`--device cuda:0 | igpu | cpu` 分别走独显、核显和手写 CPU 后端（`src/cpu/`，无 wgpu）。
+
 模型权重在 `D:/Ming-3.0-tts/Ming-3.0-tts-0.5b/`（不在本仓库）。金标在 `goldens/`
-（已入库，67 MB）。
+（已入库，67 MB；文本规范化金标见 PROGRESS 0.12）。
 
 ## 硬性规则
 
@@ -40,7 +42,9 @@ target\release\ming-tts-wgpu.exe synth ^
    搞错任何一个，parity 会以 1e-1 量级失败。
 5. **Python 主仓 `D:\Ming-3.0-tts` 是只读参考**，不要改它。
 6. **单次改动后必须跑 `cargo test --release`**；碰到音频相关的改动再跑
-   `python tools/check_params_align.py`（需要 videolingo 的 conda 环境）。
+   `python tools/check_params_align.py`（需要 videolingo 的 conda 环境；
+   `MING_ALIGN_DEVICE=cpu` 可对拍 CPU 后端）。CPU 与 GPU 都要保持能跑：CPU 侧的
+   条件必须和 `src/pipeline.rs` 的 decode_loop 一致（0.14 修过一个 CFM history 偏差）。
 
 ## 怎么判断"改对了"
 
@@ -52,22 +56,29 @@ target\release\ming-tts-wgpu.exe synth ^
   守这条线：长 prefill（161 token）、长解码（640 帧 / 12.8 s）、长编码（600 帧 / 12 s）。
 - **不要追求逐采样点一致**：解码环是混沌的，1e-7 的输入扰动会被放大 1e5 倍
   （PROGRESS.md 4.4 已量化）。目标是每步 ~1e-6 数值一致 + 停止判据一致 + 听感一致。
+- 测试在 P104 上偶发设备掉线（`Buffer with 'readback' label is invalid` /
+  STATUS_ACCESS_VIOLATION，每次挂的测试不同、单跑 3/3 通过）；核显 `MING_DEVICE=igpu`
+  连跑稳定，CI 建议钉核显。
 
-## 当前唯一的未完成项
+## 现状（2026-11-03）
 
-RTF **1.07–1.18**（长句 5.00 s 音频 / 63 latents：解码环 5.35–5.91 s，随热状态），
-目标 < 0.88；Python CUDA Graph 是 5.11 s（RTF 1.008），已基本追平。
+- 三条后端（`cuda:0` / `igpu` / `cpu`）与 `infer.py` 的参数面、功能面一致：8 种 task、
+  分片、克隆（prompt wav 或 `.pt` 说话人向量）、zero-spk、STYLE 首片重条件、中英文本
+  规范化（规则层 + FST + inflect 措辞）。唯一没做的是 `infer.py` 本身没暴露的流式。
+- 性能：P104 上 A1（3.2 s 音频）总耗时约 3.0 s（RTF 0.60），Python CUDA Graph 0.782；
+  CPU 后端 RTF ≈ 2.2（原版 Python CPU 4.0–5.3）。这张矿卡热状态会让同一命令差 2.3×，
+  A/B 必须在同一窗口内做。
+- 代码结构：`src/cpu/` 与 GPU 各阶段一一对应；`src/tn/` 是文本规范化移植；
+  `src/pt.rs` 是无 torch 的 `.pt` 读取器。
 
-**先读 PROGRESS.md 0.5.8** —— 它推翻了"瓶颈是 dispatch 数"这个旧判断。实测结论：
-cuBLAS fp32 在同形状比我们快 2×（这张卡没有 bf16 原生支持），它的有效读取带宽
-~120 GB/s 而我们 47 GB/s；且 t=117 的 prefill 里**同族 kernel 在 13104 个 workgroup
-下跑到 150 GB/s**，t=6 只有 128 个 workgroup 时只有 47 GB/s。**差距是 workgroup
-并行度，不是 dispatch 数、不是算术量。**
+## 已知可继续的清理（非功能缺口）
 
-下一步按收益排序：
-1. **split-K**（最明确）：DiT 每层 32–128 个 workgroup，按 K 切 2–4 份 + 融合 bias。
-2. prefill 换真 GEMM（分块已把冗余从 117 降到 20，但每块 workgroup 数仍偏低）。
-3. 合并 dispatch（gelu 融 ff_in epilogue、add 融 rms），每 block 省 2 次。
+1. `synth.rs` 与 `src/cpu/run.rs` 的分片编排仍是两份（约 120 行重复）。抽 `Backend`
+   trait 可以合并，但需要统一 GPU/CPU 两套 decode_loop 签名，并跑 36 例 + 压力集回归。
+2. `ops.rs` 启动时编译 14 个 GEMV 变体（`MING_T6=base|v8..v14` 等 A/B 口）。性能定稿后
+   可以只留默认赢家；删除前必须在同一热状态下重测 RTF。
+3. `shaders.rs` 的 WGSL 字符串可以按 kernel 家族拆分（1850 行里大部分是生成的
+   `gemv_t6_vec4` 变体）。
 
 A/B 回退口：`MING_T6=base|v8..v14`、`MING_T1=base|half|v1..v4`、`MING_SCRATCH=0`、
 `MING_LM_FAST=0`、`MING_BIND_CACHE=0`。分段耗时 `MING_PROFILE=1`，
