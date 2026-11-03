@@ -75,7 +75,8 @@ SPEC = [
 
 def cli_args(name, task, text, kwargs):
     args = [EXE, "synth", "--model_path", MODEL, "--task", task, "--text", text,
-            "--output", f"{OUT}/{name}.wav", "--no_text_normalization"]
+            "--output", f"{OUT}/{name}.wav", "--no_text_normalization",
+            "--device", os.environ.get("MING_ALIGN_DEVICE", "cuda:0")]
     c = kwargs.get("controls") or {}
     for k in ("speed", "pitch", "volume", "emotion", "dialect", "style", "ip"):
         if c.get(k):

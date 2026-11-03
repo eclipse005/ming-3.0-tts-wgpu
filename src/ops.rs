@@ -37,6 +37,18 @@ pub fn uni4(a: u32, b: u32, c: u32, d: u32) -> [u8; 16] {
     u
 }
 
+/// Five-field block for kernels that walk a token window (the 48x64 tiled
+/// GEMM: rows, K, tokens in this tile, kg, token offset).
+pub fn uni5(a: u32, b: u32, c: u32, d: u32, e: u32) -> [u8; 32] {
+    let mut u = [0u8; 32];
+    u[0..4].copy_from_slice(&a.to_le_bytes());
+    u[4..8].copy_from_slice(&b.to_le_bytes());
+    u[8..12].copy_from_slice(&c.to_le_bytes());
+    u[12..16].copy_from_slice(&d.to_le_bytes());
+    u[16..20].copy_from_slice(&e.to_le_bytes());
+    u
+}
+
 /// A bias-ful linear layer with bf16 weights kept packed 2-per-u32.
 pub struct Lin {
     pub w: Buffer,
@@ -273,7 +285,11 @@ pub struct Ops {
     k_linear_t6v13: crate::nn::Kernel,
     k_linear_t6v14: crate::nn::Kernel,
     k_linear_t6win: crate::nn::Kernel,
+    /// Twelve-token window variant of the vectorised kernel: same micro-kernel,
+    /// twice the weight reuse. Used for t > 8 (VAE decode, long prompts).
+    k_linear_t12win: crate::nn::Kernel,
     t6_vec4: bool,
+    t12: bool,
     t6_specialized: bool,
     t6_paired: bool,
     t6_halfwarp: bool,
@@ -281,7 +297,11 @@ pub struct Ops {
     t6_fourlane: bool,
     t6_hybrid: bool,
     k_prefill_tile: crate::nn::Kernel,
+    /// Tile allowed for post-hoc (decoder) linears: discrete GPUs only.
     prefill_tiled: bool,
+    /// `MING_PREFILL=tile`: also use the tile in prefill/encoder, which changes
+    /// the generation trajectory (experimental).
+    prefill_tile_all: bool,
     k_rope: crate::nn::Kernel,
     k_attend: crate::nn::Kernel,
     k_kv_write: crate::nn::Kernel,
@@ -329,16 +349,17 @@ impl Ops {
             // v10: same 2-row blocking at 128 threads (32 rows per workgroup).
             // v11: 8 lanes/row, one row per lane group, vectorised loads only.
             // v12/v13: like v10 with 2 and 4 granules unrolled per iteration.
-            k_linear_t6v8: kernel(&gpu, &shaders::gemv_t6_vec4(32, 256, 2, 1, false), 3),
-            k_linear_t6v9: kernel(&gpu, &shaders::gemv_t6_vec4(8, 256, 2, 1, false), 3),
-            k_linear_t6v10: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 1, false), 3),
-            k_linear_t6v11: kernel(&gpu, &shaders::gemv_t6_vec4(8, 256, 1, 1, false), 3),
-            k_linear_t6v12: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 2, false), 3),
-            k_linear_t6v13: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 4, false), 3),
-            k_linear_t6v14: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 1, 2, false), 3),
+            k_linear_t6v8: kernel(&gpu, &shaders::gemv_t6_vec4(32, 256, 2, 1, false, 6), 3),
+            k_linear_t6v9: kernel(&gpu, &shaders::gemv_t6_vec4(8, 256, 2, 1, false, 6), 3),
+            k_linear_t6v10: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 1, false, 6), 3),
+            k_linear_t6v11: kernel(&gpu, &shaders::gemv_t6_vec4(8, 256, 1, 1, false, 6), 3),
+            k_linear_t6v12: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 2, false, 6), 3),
+            k_linear_t6v13: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 4, false, 6), 3),
+            k_linear_t6v14: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 1, 2, false, 6), 3),
             // Same shape as the default, but able to slide its six-token window
             // across a long prompt (prefill).
-            k_linear_t6win: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 2, true), 3),
+            k_linear_t6win: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 2, true, 6), 3),
+            k_linear_t12win: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 2, true, 12), 3),
             // The vectorised 2-row kernel is the default. The older scalar
             // variants stay reachable through MING_T6=base|spec|v2..v5.
             t6_vec4: std::env::var("MING_T6")
@@ -350,7 +371,18 @@ impl Ops {
             t6_fourlane: std::env::var("MING_T6").is_ok_and(|v| v == "v5"),
             t6_hybrid: std::env::var("MING_T6").map_or(true, |v| v == "hybrid"),
             k_prefill_tile: kernel(&gpu, shaders::GEMM_PREFILL_48X64, 3),
-            prefill_tiled: std::env::var("MING_PREFILL").map_or(true, |v| v != "base"),
+            // Large-t strategy follows the adapter class, because the two
+            // kernels are bound by different things: the 48x64 tile is compute
+            // bound and needs a discrete GPU's FP32 throughput, while the
+            // register-window kernel is bandwidth bound and wins on integrated
+            // ones (measured: tile is 2x faster on a P104, 1.6x slower on an
+            // Intel UHD). `MING_PREFILL=tile|window` overrides for A/B.
+            prefill_tiled: match std::env::var("MING_PREFILL").ok().as_deref() {
+                Some("base") | Some("window") => false,
+                _ => gpu.device_type == wgpu::DeviceType::DiscreteGpu,
+            },
+            prefill_tile_all: std::env::var("MING_PREFILL").is_ok_and(|v| v == "tile"),
+            t12: std::env::var("MING_T12").map_or(true, |v| v != "0"),
             k_rope: kernel(&gpu, shaders::ROPE, 2),
             k_attend: kernel(&gpu, shaders::ATTEND, 3),
             k_kv_write: kernel(&gpu, shaders::KV_WRITE, 1),
@@ -376,6 +408,12 @@ impl Ops {
             1,
         );
         y
+    }
+
+    /// Which large-t (VAE decode/encode, long prefill) kernel the adapter got:
+    /// the 48x64 tile on discrete GPUs, the register window elsewhere.
+    pub fn large_t_tile(&self) -> bool {
+        self.prefill_tiled
     }
 
     /// y = W x + b for `t` rows. Batches of up to 4 use the weight-reuse
@@ -489,17 +527,94 @@ impl Ops {
         self.linear_into(lin, x, y, t);
     }
 
+    /// Decoder-side linear. The 48x64 tile is allowed here because this output
+    /// only becomes the waveform: it never feeds the autoregressive loop, so a
+    /// different reduction order cannot change the token trajectory. Prefill and
+    /// the VAE encoder deliberately stay on the window kernel (`linear_into`) --
+    /// routing the tile through those shifted the stop step on long single
+    /// segments (S3/S10) and would break the "same duration" acceptance bar.
+    pub fn linear_big(&self, lin: &Lin, x: &Buffer, t: usize) -> Result<Buffer> {
+        if t > 8
+            && self.prefill_tiled
+            && lin.rows % 64 == 0
+            && lin.in_features % 32 == 0
+        {
+            let y = self.gpu.storage((t * lin.rows * 4) as u64, "linear.y");
+            self.tile_chunks(lin, x, &y, t);
+            return Ok(y);
+        }
+        self.linear(lin, x, t)
+    }
+
+    /// Walk `t` tokens through the 64-row x 48-token tile, one window at a time.
+    fn tile_chunks(&self, lin: &Lin, x: &Buffer, y: &Buffer, t: usize) {
+        let mut tok0 = 0usize;
+        while tok0 < t {
+            let n = (t - tok0).min(48);
+            self.k_prefill_tile.run(
+                &self.gpu,
+                &uni5(
+                    lin.rows as u32,
+                    lin.in_features as u32,
+                    // n_tok is the GLOBAL end of this window: the kernel compares
+                    // `tok0 + local` against it, so passing the window length
+                    // alone would zero every chunk but the first.
+                    (tok0 + n) as u32,
+                    (lin.in_features / 8) as u32,
+                    tok0 as u32,
+                ),
+                &[&lin.w, x, &lin.b],
+                y,
+                (lin.rows / 64) as u32,
+                n.div_ceil(48) as u32,
+            );
+            tok0 += n;
+        }
+    }
+
     pub fn linear_into(&self, lin: &Lin, x: &Buffer, y: &Buffer, t: usize) {
-        // Prompts longer than the 8-token kernel's window: the generic path
-        // dispatches one workgroup per (row block, token), so a 117-token
-        // prompt re-reads the entire weight set 117 times. It runs at ~150 GB/s
-        // doing so -- i.e. the bandwidth is fine and the redundancy is not.
-        // Walking the prompt in chunks of six lets the vectorised kernel share
-        // each weight read across six tokens, which is a 6x traffic cut.
-        //
-        // The default kernel's granule stride is 16 vec4 = 128 K elements, which
-        // is why the guard is % 128 and not t6_plan's % 256: the LLM's 896 and
-        // 4864 are both multiples of 128 but not of 256.
+        // Experimental global override: MING_PREFILL=tile also routes prefill /
+        // encoder through the tile. That changes the generation trajectory (the
+        // kernel's K reduction order differs), so it is not the default.
+        if t > 8
+            && self.prefill_tile_all
+            && lin.rows % 64 == 0
+            && lin.in_features % 32 == 0
+        {
+            self.tile_chunks(lin, x, y, t);
+            return;
+        }
+        // t > 8 (VAE decode/encode, long prefill): walk the batch in windows of
+        // 12 tokens instead of 6. Same micro-kernel and register blocking, but
+        // each weight read feeds twice as many tokens -- this halves the weight
+        // traffic of the VAE decoder (t=252: 42 passes -> 21) without the
+        // shared-memory transpose the tiled kernel needs.
+        if t > 8 && self.t6_vec4 && self.t12 && lin.in_features % 128 == 0 {
+            let per_wg = 32;
+            let mut tok0 = 0usize;
+            while tok0 < t {
+                let n = (t - tok0).min(12);
+                self.k_linear_t12win.run(
+                    &self.gpu,
+                    &uni4(
+                        lin.rows as u32,
+                        (lin.in_features / 2) as u32,
+                        n as u32,
+                        tok0 as u32,
+                    ),
+                    &[&lin.w, x, &lin.b],
+                    y,
+                    lin.rows.div_ceil(per_wg) as u32,
+                    1,
+                );
+                tok0 += n;
+            }
+            return;
+        }
+        // Fallback for odd shapes: six-token windows. The kernel only needs
+        // whole vec4 granules, i.e. in_features % 8 == 0; the % 128 guard is
+        // kept because loosening it changes the encoder's reduction order for
+        // no measured gain.
         if t > 8 && self.t6_vec4 && lin.in_features % 128 == 0 {
             let per_wg = 32;
             let mut tok0 = 0usize;
@@ -522,34 +637,8 @@ impl Ops {
             }
             return;
         }
-        // Long prompts are wide enough to amortise a real 2D tile. The generic
-        // path below still covers odd shapes and remains available via
-        // MING_PREFILL=base for A/B. Widening the range to 512 was measured at
-        // t=117 and came out neutral, so the tile kernel itself -- not the
-        // range -- is what limits prefill.
-        if self.prefill_tiled
-            && (16..=48).contains(&t)
-            && lin.rows % 64 == 0
-            && lin.in_features % 32 == 0
-            // The 896x4864 down projection only yields 14 N tiles, so the tiled
-            // grid cannot fill all SMs; the generic token-parallel kernel wins.
-            && !(lin.rows < 1024 && lin.in_features >= 4096)
-        {
-            self.k_prefill_tile.run(
-                &self.gpu,
-                &uni4(
-                    lin.rows as u32,
-                    lin.in_features as u32,
-                    t as u32,
-                    (lin.in_features / 8) as u32,
-                ),
-                &[&lin.w, x, &lin.b],
-                y,
-                (lin.rows / 64) as u32,
-                (t.div_ceil(48)) as u32,
-            );
-            return;
-        }
+        // Long prompts / VAE batch are handled by the tiled path above; odd
+        // shapes fall through to the generic kernel below.
         if t == 6 {
             if let Some((k, per_wg)) = self.t6_plan(lin) {
                 k.run(

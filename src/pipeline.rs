@@ -92,6 +92,8 @@ impl Default for SynthParams {
 pub struct Pipeline {
     pub gpu: Gpu,
     pub w: Weights,
+    /// Kept so callers can report which large-t strategy the adapter picked.
+    pub ops: std::sync::Arc<crate::ops::Ops>,
     pub llm: LlmEngine,
     pub dit: DitEngine,
     pub dec: VaeDecoder,
@@ -114,9 +116,22 @@ pub struct LoopTrace {
 }
 
 impl Pipeline {
+    /// Auto-preference loader (tests). The CLI uses [`Self::load_pref`] so
+    /// `--device` is honoured.
+    #[allow(dead_code)]
     pub fn load(model_dir: &Path, with_encoder: bool) -> Result<Self> {
+        Self::load_pref(model_dir, with_encoder, crate::gpu::DevicePref::Auto)
+    }
+
+    /// `pref` is the CLI's `--device` (cuda:0 / igpu / cpu) resolved to a class
+    /// of adapter. Everything downstream shares the one device this picks.
+    pub fn load_pref(
+        model_dir: &Path,
+        with_encoder: bool,
+        pref: crate::gpu::DevicePref,
+    ) -> Result<Self> {
         let w = Weights::load(&model_dir.join("model.safetensors"))?;
-        let gpu = Gpu::new()?;
+        let gpu = Gpu::with_pref(pref)?;
         // One compiled kernel set and one device for every stage.
         let ops = std::sync::Arc::new(crate::ops::Ops::new(gpu.clone()));
         let llm = LlmEngine::load(gpu.clone(), ops.clone(), &w)?;
@@ -132,8 +147,7 @@ impl Pipeline {
             "spk.w",
         );
         let spk_b = gpu.upload_f32(&w.get("spk_head.bias")?.to_f32()?, "spk.b");
-        let _ = ops;
-        Ok(Self { gpu, w, llm, dit, dec, enc, spk_w, spk_b })
+        Ok(Self { gpu, w, ops, llm, dit, dec, enc, spk_w, spk_b })
     }
 
     /// Token ids -> [T, 896] input embeddings (no speaker / latent rows).
@@ -212,6 +226,7 @@ impl Pipeline {
                  shorten it. The reference silently returns no audio for this input."
             );
         }
+        let stop_trace = std::env::var("MING_STOP_TRACE").is_ok();
         let steps = p.max_decode_steps.min(budget);
         let mut latents: Vec<f32> = Vec::new();
         let mut z_steps = Vec::new();
@@ -229,6 +244,9 @@ impl Pipeline {
             dit_time += t_d.elapsed();
             z_steps.push(z.clone());
             probs.push(prob[1]);
+            if stop_trace {
+                println!("    step {step:2}: stop_prob {:.6}", prob[1]);
+            }
             latents.extend_from_slice(&lat);
 
             let done = prob[1] > 0.5 && step > 3;

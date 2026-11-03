@@ -88,7 +88,9 @@ impl VaeDecoder {
     }
 
     fn mrow(&self, lin: &Lin, x: &Buffer, t: usize) -> Result<Buffer> {
-        self.ops.linear(lin, x, t)
+        // Decoder output is the waveform: the tiled GEMM is safe here and does
+        // not influence the token trajectory (see Ops::linear_big).
+        self.ops.linear_big(lin, x, t)
     }
 
     fn silu_mul(&self, g: &Buffer, u: &Buffer, n: usize) -> Buffer {

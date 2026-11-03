@@ -16,6 +16,8 @@ pub struct Args {
     pub task: String,
     pub text: String,
     pub output: String,
+    /// `cuda:0` (discrete), `igpu` (integrated) or `cpu` (WARP/lavapipe).
+    pub device: String,
     pub seed: i64,
     pub language_id: Option<String>,
     pub instruction: Option<String>,
@@ -180,7 +182,16 @@ pub fn run(a: Args) -> Result<()> {
     let reference_first_fragment = req.taskname == "STYLE" && fragments.len() > 1;
     let needs_encoder = need_prompt || reference_first_fragment;
     let mem = std::env::var("MING_MEM").is_ok();
-    let mut pl = Pipeline::load(model_dir, needs_encoder)?;
+    let mut pl = Pipeline::load_pref(
+        model_dir,
+        needs_encoder,
+        crate::gpu::DevicePref::parse(&a.device)?,
+    )?;
+    println!(
+        "device: {} | large-t: {}",
+        pl.gpu.describe(),
+        if pl.ops.large_t_tile() { "48x64 tile" } else { "12-token window" }
+    );
     if mem {
         let (cum, peak) = pl.gpu.mem_stats();
         println!("  mem load      : cumulative {:.1} MiB, peak window {:.1} MiB", cum as f64 / 1048576.0, peak as f64 / 1048576.0);

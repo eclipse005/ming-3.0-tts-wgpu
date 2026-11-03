@@ -95,12 +95,12 @@ fn main() -> Result<()> {
             use_spk_emb, use_zero_spk_emb, no_text_normalization, raw_text,
             no_trim_silence,
         } => {
-            let _ = device; // accepted for infer.py parity; wgpu picks the adapter
             synth::run(synth::Args {
                 model_path: model_path.clone(),
                 task: task.clone(),
                 text: text.clone(),
                 output: output.clone(),
+                device: device.clone(),
                 seed: *seed,
                 language_id: language_id.clone(),
                 instruction: instruction.clone(),

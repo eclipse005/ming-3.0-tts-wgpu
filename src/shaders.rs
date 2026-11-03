@@ -548,6 +548,7 @@ fn main(
 /// [`GEMV_T6_PAIRED`].
 fn gemv_t6_lanes(lanes: u32, threads: u32) -> String {
     assert!(32 % lanes == 0 && threads % 32 == 0 && threads % lanes == 0);
+    let tok: u32 = 6;
     let rows_per_wg = threads / lanes;
     let offsets = [0u32, lanes, 2 * lanes, 3 * lanes];
     let last_off = 3 * lanes;
@@ -560,7 +561,7 @@ fn gemv_t6_lanes(lanes: u32, threads: u32) -> String {
              \x20           let l{off} = bf_lo(u{off});\n\
              \x20           let h{off} = bf_hi(u{off});\n"
         ));
-        for t in 0..6u32 {
+        for t in 0..tok {
             let idx = if t == 0 {
                 format!("wi + {off}u")
             } else {
@@ -573,11 +574,11 @@ fn gemv_t6_lanes(lanes: u32, threads: u32) -> String {
         }
     }
     let mut reduce = String::new();
-    for t in 0..6u32 {
+    for t in 0..tok {
         reduce.push_str(&format!("            red[rl][{t}][lane] = red[rl][{t}][lane] + red[rl][{t}][lane + s];\n"));
     }
     let mut store = String::new();
-    for t in 0..6u32 {
+    for t in 0..tok {
         let idx = if t == 0 {
             "row".to_string()
         } else {
@@ -592,7 +593,7 @@ fn gemv_t6_lanes(lanes: u32, threads: u32) -> String {
 @group(0) @binding(2) var<storage, read> x: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read> b: array<f32>;
 @group(0) @binding(4) var<storage, read_write> y: array<f32>;
-var<workgroup> red: array<array<array<f32, {lanes}>, 6>, {rows_per_wg}>;
+var<workgroup> red: array<array<array<f32, {lanes}>, {tok}>, {rows_per_wg}>;
 
 fn bf_lo(u: u32) -> f32 {{ return bitcast<f32>((u & 0xFFFFu) << 16u); }}
 fn bf_hi(u: u32) -> f32 {{ return bitcast<f32>(u & 0xFFFF0000u); }}
@@ -676,7 +677,7 @@ pub fn gemv_t6_fourlane() -> String {
 /// `in4` must be a multiple of `unroll * lanes`; callers guarantee
 /// `in_features % 256 == 0`, i.e. `in4 % 32 == 0`, so this holds for
 /// `lanes in {8, 32}` with `unroll in {1, 2, 4}`.
-pub fn gemv_t6_vec4(lanes: u32, threads: u32, rpl: u32, unroll: u32, guarded: bool) -> String {
+pub fn gemv_t6_vec4(lanes: u32, threads: u32, rpl: u32, unroll: u32, guarded: bool, tok: u32) -> String {
     assert!(lanes > 0 && 32 % lanes == 0, "lanes must divide a warp");
     assert!(threads % 32 == 0 && threads % lanes == 0);
     assert!(rpl >= 1 && unroll >= 1);
@@ -687,7 +688,7 @@ pub fn gemv_t6_vec4(lanes: u32, threads: u32, rpl: u32, unroll: u32, guarded: bo
 
     let mut decl = String::new();
     for m in 0..rpl {
-        for t in 0..6u32 {
+        for t in 0..tok {
             decl.push_str(&format!("    var a{m}_{t} = 0.0;\n"));
         }
     }
@@ -728,7 +729,7 @@ pub fn gemv_t6_vec4(lanes: u32, threads: u32, rpl: u32, unroll: u32, guarded: bo
     // One token at a time: its activations stay live just long enough to feed
     // every row accumulator, so peak pressure is `2 * unroll` vec4 of x rather
     // than all six tokens at once.
-    for t in 0..6u32 {
+    for t in 0..tok {
         // The guarded variant walks a sliding six-token window across a long
         // prompt; the unguarded one is the DiT's fixed six-row batch and keeps
         // the loop body free of both the token-offset add and the n_tok tests.
@@ -770,7 +771,7 @@ pub fn gemv_t6_vec4(lanes: u32, threads: u32, rpl: u32, unroll: u32, guarded: bo
 
     let mut reduce = String::new();
     for m in 0..rpl {
-        for t in 0..6u32 {
+        for t in 0..tok {
             let i = format!("red[rl * {rpl}u + {m}u][{t}]");
             reduce.push_str(&format!(
                 "            {i}[lane] = {i}[lane] + {i}[lane + s];\n"
@@ -788,7 +789,7 @@ pub fn gemv_t6_vec4(lanes: u32, threads: u32, rpl: u32, unroll: u32, guarded: bo
         store.push_str(&format!("        if ({guard}) {{\n"));
         store.push_str(&format!("            let row = r0 + {m}u;\n"));
         store.push_str("            let bias = b[row];\n");
-        for t in 0..6u32 {
+        for t in 0..tok {
             let (open, close, idx) = if guarded {
                 (
                     format!("            if (p.n_tok > {t}u) {{\n"),
@@ -811,7 +812,7 @@ pub fn gemv_t6_vec4(lanes: u32, threads: u32, rpl: u32, unroll: u32, guarded: bo
 
     let mut store_in = String::new();
     for m in 0..rpl {
-        for t in 0..6u32 {
+        for t in 0..tok {
             store_in.push_str(&format!(
                 "    red[rl * {rpl}u + {m}u][{t}][lane] = a{m}_{t};\n"
             ));
@@ -825,7 +826,7 @@ pub fn gemv_t6_vec4(lanes: u32, threads: u32, rpl: u32, unroll: u32, guarded: bo
 @group(0) @binding(2) var<storage, read> x: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> b: array<f32>;
 @group(0) @binding(4) var<storage, read_write> y: array<f32>;
-var<workgroup> red: array<array<array<f32, {lanes}>, 6>, {rows_per_wg}>;
+var<workgroup> red: array<array<array<f32, {lanes}>, {tok}>, {rows_per_wg}>;
 
 fn bf_lo(u: u32) -> f32 {{ return bitcast<f32>((u & 0xFFFFu) << 16u); }}
 fn bf_hi(u: u32) -> f32 {{ return bitcast<f32>(u & 0xFFFF0000u); }}
@@ -1386,7 +1387,7 @@ fn main(
 ///
 /// Requires rows % 64 == 0 and K % 32 == 0; other shapes keep the generic path.
 pub const GEMM_PREFILL_48X64: &str = r#"
-struct Params { rows: u32, k: u32, n_tok: u32, kg: u32, }  // kg = K / 8
+struct Params { rows: u32, k: u32, n_tok: u32, kg: u32, tok0: u32, }  // kg = K / 8
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> w: array<vec4<u32>>;  // [rows, kg], 8 bf16 each
 @group(0) @binding(2) var<storage, read> x: array<f32>;        // [T, K]
@@ -1406,7 +1407,7 @@ fn main(
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
     let n0 = wg.x * 64u;
-    let tok0 = wg.y * 48u;
+    let tok0 = p.tok0 + wg.y * 48u;
     let tid = li;
     let ktiles = p.k / 32u;
     var c0 = vec4<f32>(0.0);

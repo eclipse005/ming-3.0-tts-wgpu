@@ -402,19 +402,19 @@ mod gemm_bench {
                 std::hint::black_box(generic.linear(&lin, &x, t).unwrap());
                 std::hint::black_box(tiled.linear(&lin, &x, t).unwrap());
             }
-            gpu.flush();
+            gpu.flush_wait();
             let iters = 4;
             let t0 = std::time::Instant::now();
             for _ in 0..iters {
                 std::hint::black_box(generic.linear(&lin, &x, t).unwrap());
             }
-            gpu.flush();
+            gpu.flush_wait();
             let a_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
             let t0 = std::time::Instant::now();
             for _ in 0..iters {
                 std::hint::black_box(tiled.linear(&lin, &x, t).unwrap());
             }
-            gpu.flush();
+            gpu.flush_wait();
             let b_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
             println!("    generic {a_us:8.1} us | tiled {b_us:8.1} us | {:.2}x", a_us / b_us);
         }
@@ -433,6 +433,11 @@ mod gemm_bench {
             (896, 896, 1),
             (4864, 896, 1),
             (896, 4864, 1),
+            // VAE decoder batch shapes: 48-token tile vs the six-token
+            // fallback (MING_PREFILL=base).
+            (896, 896, 252),
+            (4864, 896, 252),
+            (896, 4864, 252),
         ] {
             let lin = lin_of(&gpu, rows, inf);
             let x = gpu.upload_f32(&vec![0.5f32; tok * inf], "bench.x");
@@ -440,14 +445,14 @@ mod gemm_bench {
                 let y = ops.linear(&lin, &x, tok);
                 std::hint::black_box(&y);
             }
-            gpu.flush();
+            gpu.flush_wait();
             let iters = 20;
             let t0 = std::time::Instant::now();
             for _ in 0..iters {
                 let y = ops.linear(&lin, &x, tok);
                 std::hint::black_box(&y);
             }
-            gpu.flush();
+            gpu.flush_wait();
             let dt = t0.elapsed().as_secs_f64() / iters as f64;
             let mb = (rows * inf * 2) as f64 / 1e6;
             println!(
