@@ -1489,6 +1489,92 @@ fn main(
 /// interlected=0: Qwen2 rotate-half (pairs hd, hd+32); =1: x_transformers
 /// interleaved (pairs 2hd, 2hd+1). Angle tables [512, 32] f32 host-side.
 /// pos = pos_base + wg.x; dispatch (1, 1) for decode, (T, 1) for prefill.
+
+/// Scalar attention for software adapters (DX12 WARP / lavapipe).
+///
+/// Same maths as [ATTEND], but it deliberately avoids the two tree
+/// reductions: some software rasterisers mis-execute workgroupBarrier inside
+/// a loop and then read uninitialised scratch, which showed up as all-NaN
+/// attention rows on WARP while q/k/v and the RMSNorm (unrolled barriers) were
+/// fine. Each lane scans the score scratch itself -- 64x redundant max/sum, but
+/// correct, and this path only ever runs on CPUs.
+pub const ATTEND_SIMPLE: &str = r#"
+struct Params {
+    t_q: u32, q_pos_base: u32, heads_per_kv: u32, scale: f32,
+    full: u32, qpos_max: u32, stride: u32, window: u32,
+    cap: u32, group: u32,
+}
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> q: array<f32>;
+@group(0) @binding(2) var<storage, read> kc: array<f32>;
+@group(0) @binding(3) var<storage, read> vc: array<f32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;
+var<workgroup> sc: array<f32, 512>;
+
+@compute @workgroup_size(64)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let head = wg.x;
+    let t = wg.y;
+    let kvh = head / p.heads_per_kv;
+    var qpos = p.q_pos_base + t;
+    if (p.full > 0u) { qpos = p.qpos_max; }
+    var lo = select(0u, max(qpos, p.window - 1u) - (p.window - 1u), p.window > 0u);
+    if (p.group > 0u) {
+        let g = t / p.group;
+        lo = g * p.group;
+        qpos = lo + p.group - 1u;
+    }
+    let qbase = t * p.stride + head * 64u;
+    let kbase = kvh * p.cap * 64u;
+    let d = lid.x;
+
+    // Scores: lane d owns positions d, d+64, ...
+    var pos = d;
+    loop {
+        if (pos > qpos) { break; }
+        if (pos >= lo) {
+            var s = 0.0;
+            var dd = 0u;
+            loop {
+                if (dd >= 64u) { break; }
+                s = s + q[qbase + dd] * kc[kbase + pos * 64u + dd];
+                dd = dd + 1u;
+            }
+            sc[pos - lo] = s * p.scale;
+        }
+        pos = pos + 64u;
+    }
+    workgroupBarrier();
+
+    // Every lane scans the window itself: no reduction, no barriers in loops.
+    var m = -3.0e38;
+    pos = lo;
+    loop {
+        if (pos > qpos) { break; }
+        m = max(m, sc[pos - lo]);
+        pos = pos + 1u;
+    }
+    var denom = 0.0;
+    pos = lo;
+    loop {
+        if (pos > qpos) { break; }
+        denom = denom + exp(sc[pos - lo] - m);
+        pos = pos + 1u;
+    }
+    var acc = 0.0;
+    pos = lo;
+    loop {
+        if (pos > qpos) { break; }
+        acc = acc + (exp(sc[pos - lo] - m) / denom) * vc[kbase + pos * 64u + d];
+        pos = pos + 1u;
+    }
+    y[qbase + d] = acc;
+}
+"#;
+
 pub const ROPE: &str = r#"
 // row_base shifts only the ROW addressed in the activation (and the table for
 // the position stays pos_base + token): batched branches need positions
@@ -1813,6 +1899,39 @@ fn main(
         let beta = 0.7978845608028654;
         let kappa = 0.044715;
         y[i] = 0.5 * v * (1.0 + tanh(v * beta * (1.0 + v * v * kappa)));
+    }
+}
+"#;
+
+/// GELU for software adapters. Same formula, but tanh is written as
+/// 1 - 2/(exp(2|x|)+1) with the sign restored: D3D12 WARP lowers 	anh to a
+/// form that overflows for |argument| > ~44 (inf/inf), which showed up as a
+/// 0.34 rel_l2 in the DiT block and as NaNs downstream. GPU drivers have a
+/// saturating native tanh, so they keep [GELU_TANH] unchanged.
+pub const GELU_TANH_STABLE: &str = r#"
+struct Params { n: u32, }
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read_write> y: array<f32>;
+
+fn tanh_stable(x: f32) -> f32 {
+    let ax = abs(x);
+    let e = exp(-2.0 * ax);
+    let t = (1.0 - e) / (1.0 + e);
+    return select(-t, t, x >= 0.0);
+}
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let i = wg.x * 256u + lid.x;
+    if (i < p.n) {
+        let v = x[i];
+        let beta = 0.7978845608028654;
+        let kappa = 0.044715;
+        y[i] = 0.5 * v * (1.0 + tanh_stable(v * beta * (1.0 + v * v * kappa)));
     }
 }
 "#;

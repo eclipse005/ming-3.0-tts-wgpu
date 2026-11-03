@@ -152,8 +152,22 @@ impl VaeDecoder {
         let ub = self.gpu.upload_f32(&up, "dec.up");
         let h = self.stack(&self.dec, ub, t)?;
         let z = self.rms(&h, &self.dec_norm, t);
+        if std::env::var("MING_NAN_TRACE").is_ok() {
+            if let Ok(v) = self.gpu.read_f32(&z, t * HIDDEN) {
+                let nan = v.iter().filter(|x| x.is_nan()).count();
+                let max = v.iter().fold(0f32, |a, b| if b.is_nan() { a } else { a.max(b.abs()) });
+                println!("    [nan] vae.stack      nan={nan} absmax={max:.4e}");
+            }
+        }
         let head = self.mrow(&self.head, &z, t)?;
         let spec = self.gpu.read_f32(&head, t * (self.head.rows))?;
+        if std::env::var("MING_NAN_TRACE").is_ok() {
+            let nan = spec.iter().filter(|x| x.is_nan()).count();
+            let max = spec.iter().fold(0f32, |a, b| if b.is_nan() { a } else { a.max(b.abs()) });
+            let mean = spec.iter().filter(|x| !x.is_nan()).sum::<f32>()
+                / spec.len().max(1) as f32;
+            println!("    [nan] vae.spec       nan={nan} absmax={max:.4e} mean={mean:.4e}");
+        }
         let bins = self.istft.n_bins();
         let mut cplx = Vec::with_capacity(t * bins);
         for row in 0..t {

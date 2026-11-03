@@ -76,6 +76,18 @@ impl Noise for Torch {
     }
 }
 
+
+/// MING_NAN_TRACE=1: report NaN/Inf/absmax for a stage's values.
+fn nan_report(label: &str, v: &[f32]) {
+    if std::env::var("MING_NAN_TRACE").is_err() {
+        return;
+    }
+    let nan = v.iter().filter(|x| x.is_nan()).count();
+    let inf = v.iter().filter(|x| x.is_infinite()).count();
+    let max = v.iter().fold(0f32, |a, b| a.max(b.abs()));
+    println!("    [nan] {label:14} n={} nan={nan} inf={inf} absmax={max:.4e}", v.len());
+}
+
 pub struct SynthParams {
     pub cfg: f32,
     pub sigma: f32,
@@ -198,6 +210,7 @@ impl Pipeline {
     ) -> Result<LoopTrace> {
         let t_pre = std::time::Instant::now();
         let (mut z, mut prob) = self.llm.prefill_full(embeds, t)?;
+        nan_report("prefill.z", &z);
         let prefill = t_pre.elapsed();
         let mut dit_time = std::time::Duration::ZERO;
         let mut llm_time = std::time::Duration::ZERO;
@@ -242,6 +255,7 @@ impl Pipeline {
             let lat = self.dit.flow_sample_stoch(
                 &z, &history, &nz, &sde, p.cfg, p.sigma, p.temperature)?;
             dit_time += t_d.elapsed();
+            nan_report("cfm.latent", &lat);
             z_steps.push(z.clone());
             probs.push(prob[1]);
             if stop_trace {
@@ -257,7 +271,9 @@ impl Pipeline {
 
             let t_l = std::time::Instant::now();
             let emb = self.project_latent(&lat)?;
+            nan_report("agg.emb", &emb);
             let (z2, p2) = self.llm.step(&emb, pos)?;
+            nan_report("llm.z", &z2);
             llm_time += t_l.elapsed();
             z = z2;
             prob = p2;

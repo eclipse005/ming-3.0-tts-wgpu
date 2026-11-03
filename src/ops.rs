@@ -304,9 +304,15 @@ pub struct Ops {
     prefill_tile_all: bool,
     k_rope: crate::nn::Kernel,
     k_attend: crate::nn::Kernel,
+    /// Reduction-free attention for software adapters (see ATTEND_SIMPLE).
+    k_attend_simple: crate::nn::Kernel,
+    cpu_attend: bool,
     k_kv_write: crate::nn::Kernel,
     k_silu: crate::nn::Kernel,
     k_gelu: crate::nn::Kernel,
+    /// Overflow-free GELU for software adapters (see GELU_TANH_STABLE).
+    k_gelu_stable: crate::nn::Kernel,
+    cpu_ops: bool,
     k_add: crate::nn::Kernel,
     k_pack3: crate::nn::Kernel,
     k_pack6: crate::nn::Kernel,
@@ -385,9 +391,13 @@ impl Ops {
             t12: std::env::var("MING_T12").map_or(true, |v| v != "0"),
             k_rope: kernel(&gpu, shaders::ROPE, 2),
             k_attend: kernel(&gpu, shaders::ATTEND, 3),
+            k_attend_simple: kernel(&gpu, shaders::ATTEND_SIMPLE, 3),
+            cpu_attend: gpu.device_type == wgpu::DeviceType::Cpu,
             k_kv_write: kernel(&gpu, shaders::KV_WRITE, 1),
             k_silu: kernel(&gpu, shaders::SILU_MUL, 2),
             k_gelu: kernel(&gpu, shaders::GELU_TANH, 1),
+            k_gelu_stable: kernel(&gpu, shaders::GELU_TANH_STABLE, 1),
+            cpu_ops: gpu.device_type == wgpu::DeviceType::Cpu,
             k_add: kernel(&gpu, shaders::ADD, 2),
             k_pack3: kernel(&gpu, shaders::PACK3, 3),
             k_pack6: kernel(&gpu, shaders::PACK6, 4),
@@ -799,8 +809,8 @@ impl Ops {
     }
 
     pub fn gelu_into(&self, x: &Buffer, y: &Buffer, n: usize) {
-        self.k_gelu
-            .run(&self.gpu, &uni1(n as u32), &[x], y, n.div_ceil(256) as u32, 1);
+        let k = if self.cpu_ops { &self.k_gelu_stable } else { &self.k_gelu };
+        k.run(&self.gpu, &uni1(n as u32), &[x], y, n.div_ceil(256) as u32, 1);
     }
 
     pub fn gelu_into_cached(&self, x: &Buffer, y: &Buffer, n: usize, key: u64) {
@@ -936,6 +946,15 @@ impl Ops {
         u
     }
 
+    /// Software adapters get the reduction-free variant (see ATTEND_SIMPLE).
+    fn attend_kernel(&self) -> &crate::nn::Kernel {
+        if self.cpu_attend {
+            &self.k_attend_simple
+        } else {
+            &self.k_attend
+        }
+    }
+
     pub fn attend(
         &self,
         p: &AttendParams,
@@ -959,7 +978,7 @@ impl Ops {
         n_q_heads: usize,
     ) {
         let u = Self::attend_uniform(p);
-        self.k_attend
+        self.attend_kernel()
             .run(&self.gpu, &u, &[q, kc, vc], y, n_q_heads as u32, p.t_q as u32);
     }
 
@@ -974,7 +993,7 @@ impl Ops {
         key: u64,
     ) {
         let u = Self::attend_uniform(p);
-        self.k_attend.run_cached(
+        self.attend_kernel().run_cached(
             &self.gpu,
             key,
             &u,

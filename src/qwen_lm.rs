@@ -65,6 +65,19 @@ pub struct LlmEngine {
     ops: Arc<Ops>,
 }
 
+
+fn nan_probe(gpu: &Gpu, label: &str, buf: &Buffer, n: usize) {
+    if std::env::var("MING_NAN_TRACE").is_err() {
+        return;
+    }
+    if let Ok(v) = gpu.read_f32(buf, n) {
+        let nan = v.iter().filter(|x| x.is_nan()).count();
+        let inf = v.iter().filter(|x| x.is_infinite()).count();
+        let max = v.iter().fold(0f32, |a, b| if b.is_nan() { a } else { a.max(b.abs()) });
+        println!("    [nan] {label:16} nan={nan} inf={inf} absmax={max:.4e}");
+    }
+}
+
 impl LlmEngine {
     pub fn load(gpu: Gpu, ops: Arc<Ops>, w: &Weights) -> Result<Self> {
         let p = |name: &str| w.get(name);
@@ -249,9 +262,15 @@ impl LlmEngine {
                 };
             }
             let a = self.rms(&h, &layer.norm1, t);
+            if li == 0 { nan_probe(&self.gpu, "l0.norm1", &a, t * HIDDEN); }
             let q = self.mrow(&layer.q, &a, t)?;
+            if li == 0 { nan_probe(&self.gpu, "l0.q", &q, t * HIDDEN); }
             let k = self.mrow(&layer.k, &a, t)?;
             let v = self.mrow(&layer.v, &a, t)?;
+            if li == 0 {
+                nan_probe(&self.gpu, "l0.k", &k, t * KV_HEADS * HEAD_DIM);
+                nan_probe(&self.gpu, "l0.v", &v, t * KV_HEADS * HEAD_DIM);
+            }
             mark!("qkv");
             self.rope_inplace(&q, Q_HEADS, t, pos_base);
             self.rope_inplace(&k, KV_HEADS, t, pos_base);
@@ -259,8 +278,11 @@ impl LlmEngine {
             self.kv_write(&v, &layer.vc, t, pos_base);
             let attn = self.attend(&q, &layer.kc, &layer.vc, t, pos_base)?;
             mark!("rope+kv+attn");
+            if li == 0 { nan_probe(&self.gpu, "l0.attn", &attn, t * HIDDEN); }
             let o = self.mrow(&layer.o, &attn, t)?;
+            if li == 0 { nan_probe(&self.gpu, "l0.o", &o, t * HIDDEN); }
             h = self.add(&h, &o, t * HIDDEN);
+            if li < 2 { nan_probe(&self.gpu, "h_after_attn", &h, t * HIDDEN); }
             mark!("o+add");
             let a2 = self.rms(&h, &layer.norm2, t);
             let g = self.mrow(&layer.gate, &a2, t)?;
