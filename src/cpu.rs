@@ -1185,13 +1185,35 @@ impl CpuPipeline {
 pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
     use crate::tasks;
     let tok = crate::tok::Tok::load(model_dir)?;
-    let controls = None;
+    let controls = {
+        let c = tasks::Controls {
+            speed: a.speed.clone(),
+            pitch: a.pitch.clone(),
+            volume: a.volume.clone(),
+            emotion: a.emotion.clone(),
+            dialect: a.dialect.clone(),
+            style: a.style.clone(),
+            ip: a.ip.clone(),
+        };
+        if c.speed.is_none()
+            && c.pitch.is_none()
+            && c.volume.is_none()
+            && c.emotion.is_none()
+            && c.dialect.is_none()
+            && c.style.is_none()
+            && c.ip.is_none()
+        {
+            None
+        } else {
+            Some(c)
+        }
+    };
     let req = tasks::build_task_generation_kwargs(
         &a.task,
         &a.text,
         a.language_id.as_deref(),
         a.instruction.as_deref(),
-        controls,
+        controls.as_ref(),
         a.instruction_schema.as_deref(),
         a.prompt_wav_path.first().map(|s| s.as_str()),
         a.prompt_text.as_deref(),
@@ -1203,12 +1225,9 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
         a.temperature,
     )?;
     let fragments = crate::synth::prepare_text(&tok, &req, a)?;
-    if req.taskname == "STYLE" && fragments.len() > 1 {
-        bail!(
-            "--device cpu does not implement STYLE re-conditioning on the first fragment yet; \
-             use cuda:0/igpu for multi-fragment STYLE."
-        );
-    }
+    // STYLE re-conditions every later fragment on the first generated chunk,
+    // exactly like ming_tts.synthesize (see synth.rs).
+    let reference_first_fragment = req.taskname == "STYLE" && fragments.len() > 1;
     let mut rng: Box<dyn crate::pipeline::Noise> = Box::new(crate::pipeline::Torch::new(a.seed));
 
     println!("device: cpu (hand-written Rust backend, rayon)");
@@ -1255,10 +1274,10 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
     if prompt_latent.is_none() {
         prompt_text = None;
     }
-    let latent_rows = prompt_latent
+    let mut latent_rows = prompt_latent
         .as_ref()
         .map(|(lat, n)| pl.project_latent_rows(lat, *n));
-    let latent_steps = prompt_latent.as_ref().map_or(0, |(_, n)| *n);
+    let mut latent_steps = prompt_latent.as_ref().map_or(0, |(_, n)| *n);
 
     let mut out: Vec<f32> = Vec::new();
     for (index, fragment) in fragments.iter().enumerate() {
@@ -1310,6 +1329,22 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
         let v = t2.elapsed();
         if !a.no_trim_silence {
             wav = crate::pipeline::Pipeline::trim_trailing_silence(&wav, 44100);
+        }
+        if reference_first_fragment && index == 0 {
+            // Same as ming_tts._prepare_generated_prompt: the trimmed chunk
+            // becomes the acoustic prompt (and the voice) for every later one.
+            let spk16 = crate::audio::resample(&wav, 44100, 16000);
+            let onnx = model_dir.join("campplus.onnx");
+            let se = crate::spk::embed_16k_with(&onnx, &spk16)?;
+            spk_row = Some(pl.project_speaker(&se));
+            let (lat, np) = pl.encode_prompt_latent(&mut *rng, &wav)?;
+            latent_rows = Some(pl.project_latent_rows(&lat, np));
+            latent_steps = np;
+            prompt_text = Some(fragment.clone());
+            println!(
+                "  re-conditioning on fragment 0: {np} prompt patches, {} speaker samples",
+                spk16.len()
+            );
         }
         println!(
             "  fragment {index}: {n} latents in {:.2}s, vae {:.2}s",
