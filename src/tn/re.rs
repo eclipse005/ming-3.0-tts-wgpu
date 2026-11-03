@@ -1180,7 +1180,7 @@ pub fn talker_re(cfg: &ReConfig, text: &str) -> String {
     }
     // RESN.det
     for i in 0..segs.len() {
-        if let Tok::Sn { txt, det } = &segs[i] {
+        if let Tok::Sn { txt, .. } = &segs[i] {
             let prev = if i > 0 { segs[i - 1].txt().to_string() } else { String::new() };
             let mut is_det = !prev.is_empty()
                 && ["SN", "sn", "序列号", "序列"]

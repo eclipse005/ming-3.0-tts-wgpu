@@ -1,0 +1,102 @@
+[
+ {
+  "input": "I have 3 apples and 25 oranges.",
+  "expected": "I have three apples and twenty-five oranges."
+ },
+ {
+  "input": "It costs $12.99 today.",
+  "expected": "It costs twelve point nine nine dollars today."
+ },
+ {
+  "input": "That is £-150 in total.",
+  "expected": "That is minus one hundred fifty pounds in total."
+ },
+ {
+  "input": "The price is 25.5% higher.",
+  "expected": "The price is twenty-five point five percent higher."
+ },
+ {
+  "input": "Add 3/4 of the flour.",
+  "expected": "Add three quarters of the flour."
+ },
+ {
+  "input": "He finished 1st and she was 2nd.",
+  "expected": "He finished one and she was two ."
+ },
+ {
+  "input": "The file is 10ms long.",
+  "expected": "The file is ten milliseconds long."
+ },
+ {
+  "input": "It weighs 5.5 kg.",
+  "expected": "It weighs five point five kilograms ."
+ },
+ {
+  "input": "The speed is 3.2 GHz.",
+  "expected": "The speed is three point two gigahertz ."
+ },
+ {
+  "input": "Use gpt-4 or v2.1 for this.",
+  "expected": "Use gpt four or v two point one for this."
+ },
+ {
+  "input": "Call me at 1,234,567.",
+  "expected": "Call me at one million, two hundred thirty-four thousand, five hundred sixty-seven ."
+ },
+ {
+  "input": "We need 100,000 dollars.",
+  "expected": "We need one hundred thousand dollars."
+ },
+ {
+  "input": "Version 2.0 is out.",
+  "expected": "Version two point zero is out."
+ },
+ {
+  "input": "In 2026 we ship.",
+  "expected": "In two thousand twenty-six we ship."
+ },
+ {
+  "input": "The answer is 42.",
+  "expected": "The answer is forty-two ."
+ },
+ {
+  "input": "Temperature -5 degrees.",
+  "expected": "Temperature - five degrees."
+ },
+ {
+  "input": "Ratio 1/2 or 5/8.",
+  "expected": "Ratio one half or five eighth ."
+ },
+ {
+  "input": "It takes 30s to load.",
+  "expected": "It takes thirty seconds to load."
+ },
+ {
+  "input": "Memory is 16GB.",
+  "expected": "Memory is sixteen gigabytes ."
+ },
+ {
+  "input": "Score 99.9%.",
+  "expected": "Score ninety-nine point nine percent ."
+ },
+ {
+  "input": "Try 1/4 cup and 1/8 tsp.",
+  "expected": "Try one quarter cup and one eighth tsp."
+ },
+ {
+  "input": "Model gpt-3.5-turbo works.",
+  "expected": "Model gpt three point five-turbo works."
+ },
+ {
+  "input": "The 21st century.",
+  "expected": "The twenty-one century."
+ },
+ {
+  "input": "About 1,000,000 people.",
+  "expected": "About one million people."
+ },
+ {
+  "input": "A 3.5-inch disk.",
+  "expected": "A three point five -inch disk."
+ }
+]

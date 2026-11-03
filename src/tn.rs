@@ -296,6 +296,12 @@ pub fn preprocess(text: &str) -> String {
         .collect()
 }
 
+/// `is_chinese`: contains a CJK unified ideograph (text_segment_cut.py).
+pub fn has_cjk(text: &str) -> bool {
+    text.chars()
+        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+}
+
 /// `(?<=\d)-(?=\d)` -> `，` (talker_tn.py).
 fn digit_hyphen(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
@@ -322,12 +328,14 @@ pub fn default_dir() -> std::path::PathBuf {
 }
 
 /// The whole TalkerTN chain (minus the TalkerRE rule layer, see module docs).
+pub mod number_en;
 pub mod re;
 
 pub struct TalkerTn {
     zh: TnFst,
     en: TnFst,
     re: re::ReConfig,
+    number_en: number_en::NumberEn,
 }
 
 impl TalkerTn {
@@ -336,7 +344,20 @@ impl TalkerTn {
             zh: TnFst::load(&dir.join("zh_tn").to_string_lossy(), "tn")?,
             en: TnFst::load(&dir.join("en_tn").to_string_lossy(), "en_tn")?,
             re: re::ReConfig::load(&dir.join("talker_re.json"))?,
+            number_en: number_en::NumberEn::new()?,
         })
+    }
+
+    /// `ming_tts._normalize_fragment`: English text runs through
+    /// `normalize_numbers` *before* TalkerTN (which preprocesses and tags it);
+    /// Chinese text goes straight to the regex layer + zh FSTs.
+    pub fn normalize_fragment(&self, text: &str) -> Result<String> {
+        let text = if has_cjk(text) {
+            text.to_string()
+        } else {
+            self.number_en.normalize(text)
+        };
+        self.normalize(&text)
     }
 
     pub fn normalize(&self, text: &str) -> Result<String> {
@@ -344,9 +365,7 @@ impl TalkerTn {
         if text.is_empty() {
             return Ok(text);
         }
-        let has_cjk = text
-            .chars()
-            .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+        let has_cjk = has_cjk(&text);
         if has_cjk {
             let text = re::talker_re(&self.re, &text);
             let text = digit_hyphen(&text);
@@ -379,7 +398,9 @@ mod tests {
         for case in &cases {
             let input = case["input"].as_str().unwrap();
             let want = case["expected"].as_str().unwrap();
-            let mut got = tn.normalize(input).unwrap_or_else(|e| format!("<err {e}>"));
+            let mut got = tn
+                .normalize_fragment(input)
+                .unwrap_or_else(|e| format!("<err {e}>"));
             got = crate::text::normalize_text_kit(&got);
             if got.starts_with('，') {
                 got = got.chars().skip(1).collect();
@@ -391,57 +412,6 @@ mod tests {
         }
         println!("tn goldens: {} cases, {bad} mismatches", cases.len());
         assert_eq!(bad, 0, "{bad} of {} TN goldens differ", cases.len());
-    }
-
-    #[test]
-    fn debug_compose() {
-        let tn = TalkerTn::load(&default_dir()).unwrap();
-        for input in ["今天天气3度", "第 12 名", "共 3 人"] {
-            let s = string_fst(input);
-            let lattice: VectorFst<TropicalWeight> = compose::<
-                TropicalWeight,
-                VectorFst<TropicalWeight>,
-                VectorFst<TropicalWeight>,
-                VectorFst<TropicalWeight>,
-                _,
-                _,
-            >(&s, &tn.zh.tagger)
-            .unwrap();
-            let best: VectorFst<TropicalWeight> = shortest_path_with_config(
-                &lattice,
-                ShortestPathConfig { nshortest: 1, unique: true, ..Default::default() },
-            )
-            .unwrap();
-            let best2: VectorFst<TropicalWeight> = shortest_path_with_config(
-                &lattice,
-                ShortestPathConfig { nshortest: 1, unique: false, ..Default::default() },
-            )
-            .unwrap();
-            let tagged = String::from_utf8_lossy(&best_path_output(&best)).into_owned();
-            let reordered = reorder(&tagged, "tn");
-            let s2 = string_fst(&reordered);
-            let lat2: VectorFst<TropicalWeight> = compose::<
-                TropicalWeight,
-                VectorFst<TropicalWeight>,
-                VectorFst<TropicalWeight>,
-                VectorFst<TropicalWeight>,
-                _,
-                _,
-            >(&s2, &tn.zh.verbalizer)
-            .unwrap();
-            let b2: VectorFst<TropicalWeight> = shortest_path_with_config(
-                &lat2,
-                ShortestPathConfig { nshortest: 1, unique: true, ..Default::default() },
-            )
-            .unwrap();
-            println!(
-                "{input:?}: lattice={} best={} tagged={tagged:?}\n  reordered={reordered:?}\n  verbal_lat={} verbal={:?}",
-                lattice.num_states(),
-                best.num_states(),
-                lat2.num_states(),
-                String::from_utf8_lossy(&best_path_output(&b2))
-            );
-        }
     }
 
     #[test]

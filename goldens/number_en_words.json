@@ -1,0 +1,1505 @@
+{
+ "words": [
+  {
+   "n": 0,
+   "and": "zero",
+   "noand": "zero"
+  },
+  {
+   "n": 1,
+   "and": "one",
+   "noand": "one"
+  },
+  {
+   "n": 2,
+   "and": "two",
+   "noand": "two"
+  },
+  {
+   "n": 3,
+   "and": "three",
+   "noand": "three"
+  },
+  {
+   "n": 4,
+   "and": "four",
+   "noand": "four"
+  },
+  {
+   "n": 5,
+   "and": "five",
+   "noand": "five"
+  },
+  {
+   "n": 9,
+   "and": "nine",
+   "noand": "nine"
+  },
+  {
+   "n": 10,
+   "and": "ten",
+   "noand": "ten"
+  },
+  {
+   "n": 11,
+   "and": "eleven",
+   "noand": "eleven"
+  },
+  {
+   "n": 12,
+   "and": "twelve",
+   "noand": "twelve"
+  },
+  {
+   "n": 13,
+   "and": "thirteen",
+   "noand": "thirteen"
+  },
+  {
+   "n": 15,
+   "and": "fifteen",
+   "noand": "fifteen"
+  },
+  {
+   "n": 19,
+   "and": "nineteen",
+   "noand": "nineteen"
+  },
+  {
+   "n": 20,
+   "and": "twenty",
+   "noand": "twenty"
+  },
+  {
+   "n": 21,
+   "and": "twenty-one",
+   "noand": "twenty-one"
+  },
+  {
+   "n": 22,
+   "and": "twenty-two",
+   "noand": "twenty-two"
+  },
+  {
+   "n": 30,
+   "and": "thirty",
+   "noand": "thirty"
+  },
+  {
+   "n": 40,
+   "and": "forty",
+   "noand": "forty"
+  },
+  {
+   "n": 45,
+   "and": "forty-five",
+   "noand": "forty-five"
+  },
+  {
+   "n": 55,
+   "and": "fifty-five",
+   "noand": "fifty-five"
+  },
+  {
+   "n": 67,
+   "and": "sixty-seven",
+   "noand": "sixty-seven"
+  },
+  {
+   "n": 78,
+   "and": "seventy-eight",
+   "noand": "seventy-eight"
+  },
+  {
+   "n": 89,
+   "and": "eighty-nine",
+   "noand": "eighty-nine"
+  },
+  {
+   "n": 99,
+   "and": "ninety-nine",
+   "noand": "ninety-nine"
+  },
+  {
+   "n": 100,
+   "and": "one hundred",
+   "noand": "one hundred"
+  },
+  {
+   "n": 101,
+   "and": "one hundred and one",
+   "noand": "one hundred one"
+  },
+  {
+   "n": 105,
+   "and": "one hundred and five",
+   "noand": "one hundred five"
+  },
+  {
+   "n": 110,
+   "and": "one hundred and ten",
+   "noand": "one hundred ten"
+  },
+  {
+   "n": 111,
+   "and": "one hundred and eleven",
+   "noand": "one hundred eleven"
+  },
+  {
+   "n": 115,
+   "and": "one hundred and fifteen",
+   "noand": "one hundred fifteen"
+  },
+  {
+   "n": 120,
+   "and": "one hundred and twenty",
+   "noand": "one hundred twenty"
+  },
+  {
+   "n": 150,
+   "and": "one hundred and fifty",
+   "noand": "one hundred fifty"
+  },
+  {
+   "n": 199,
+   "and": "one hundred and ninety-nine",
+   "noand": "one hundred ninety-nine"
+  },
+  {
+   "n": 200,
+   "and": "two hundred",
+   "noand": "two hundred"
+  },
+  {
+   "n": 201,
+   "and": "two hundred and one",
+   "noand": "two hundred one"
+  },
+  {
+   "n": 210,
+   "and": "two hundred and ten",
+   "noand": "two hundred ten"
+  },
+  {
+   "n": 300,
+   "and": "three hundred",
+   "noand": "three hundred"
+  },
+  {
+   "n": 555,
+   "and": "five hundred and fifty-five",
+   "noand": "five hundred fifty-five"
+  },
+  {
+   "n": 900,
+   "and": "nine hundred",
+   "noand": "nine hundred"
+  },
+  {
+   "n": 999,
+   "and": "nine hundred and ninety-nine",
+   "noand": "nine hundred ninety-nine"
+  },
+  {
+   "n": 1000,
+   "and": "one thousand",
+   "noand": "one thousand"
+  },
+  {
+   "n": 1001,
+   "and": "one thousand and one",
+   "noand": "one thousand one"
+  },
+  {
+   "n": 1010,
+   "and": "one thousand and ten",
+   "noand": "one thousand ten"
+  },
+  {
+   "n": 1100,
+   "and": "one thousand, one hundred",
+   "noand": "one thousand, one hundred"
+  },
+  {
+   "n": 1111,
+   "and": "one thousand, one hundred and eleven",
+   "noand": "one thousand, one hundred eleven"
+  },
+  {
+   "n": 1500,
+   "and": "one thousand, five hundred",
+   "noand": "one thousand, five hundred"
+  },
+  {
+   "n": 2000,
+   "and": "two thousand",
+   "noand": "two thousand"
+  },
+  {
+   "n": 2026,
+   "and": "two thousand and twenty-six",
+   "noand": "two thousand twenty-six"
+  },
+  {
+   "n": 3000,
+   "and": "three thousand",
+   "noand": "three thousand"
+  },
+  {
+   "n": 9999,
+   "and": "nine thousand, nine hundred and ninety-nine",
+   "noand": "nine thousand, nine hundred ninety-nine"
+  },
+  {
+   "n": 10000,
+   "and": "ten thousand",
+   "noand": "ten thousand"
+  },
+  {
+   "n": 10001,
+   "and": "ten thousand and one",
+   "noand": "ten thousand one"
+  },
+  {
+   "n": 12345,
+   "and": "twelve thousand, three hundred and forty-five",
+   "noand": "twelve thousand, three hundred forty-five"
+  },
+  {
+   "n": 20000,
+   "and": "twenty thousand",
+   "noand": "twenty thousand"
+  },
+  {
+   "n": 99999,
+   "and": "ninety-nine thousand, nine hundred and ninety-nine",
+   "noand": "ninety-nine thousand, nine hundred ninety-nine"
+  },
+  {
+   "n": 100000,
+   "and": "one hundred thousand",
+   "noand": "one hundred thousand"
+  },
+  {
+   "n": 100001,
+   "and": "one hundred thousand and one",
+   "noand": "one hundred thousand one"
+  },
+  {
+   "n": 123456,
+   "and": "one hundred and twenty-three thousand, four hundred and fifty-six",
+   "noand": "one hundred twenty-three thousand, four hundred fifty-six"
+  },
+  {
+   "n": 999999,
+   "and": "nine hundred and ninety-nine thousand, nine hundred and ninety-nine",
+   "noand": "nine hundred ninety-nine thousand, nine hundred ninety-nine"
+  },
+  {
+   "n": 1000000,
+   "and": "one million",
+   "noand": "one million"
+  },
+  {
+   "n": 1000001,
+   "and": "one million and one",
+   "noand": "one million one"
+  },
+  {
+   "n": 2000000,
+   "and": "two million",
+   "noand": "two million"
+  },
+  {
+   "n": 1234567,
+   "and": "one million, two hundred and thirty-four thousand, five hundred and sixty-seven",
+   "noand": "one million, two hundred thirty-four thousand, five hundred sixty-seven"
+  },
+  {
+   "n": 10000000,
+   "and": "ten million",
+   "noand": "ten million"
+  },
+  {
+   "n": 12345678,
+   "and": "twelve million, three hundred and forty-five thousand, six hundred and seventy-eight",
+   "noand": "twelve million, three hundred forty-five thousand, six hundred seventy-eight"
+  },
+  {
+   "n": 123456789,
+   "and": "one hundred and twenty-three million, four hundred and fifty-six thousand, seven hundred and eighty-nine",
+   "noand": "one hundred twenty-three million, four hundred fifty-six thousand, seven hundred eighty-nine"
+  },
+  {
+   "n": 1000000000,
+   "and": "one billion",
+   "noand": "one billion"
+  },
+  {
+   "n": 1234567890,
+   "and": "one billion, two hundred and thirty-four million, five hundred and sixty-seven thousand, eight hundred and ninety",
+   "noand": "one billion, two hundred thirty-four million, five hundred sixty-seven thousand, eight hundred ninety"
+  },
+  {
+   "n": 1000000000000,
+   "and": "one trillion",
+   "noand": "one trillion"
+  },
+  {
+   "n": 1000000000001,
+   "and": "one trillion and one",
+   "noand": "one trillion one"
+  },
+  {
+   "n": 2000000000345,
+   "and": "two trillion, three hundred and forty-five",
+   "noand": "two trillion, three hundred forty-five"
+  },
+  {
+   "n": 1000000000000000,
+   "and": "one quadrillion",
+   "noand": "one quadrillion"
+  },
+  {
+   "n": 1234567890123,
+   "and": "one trillion, two hundred and thirty-four billion, five hundred and sixty-seven million, eight hundred and ninety thousand, one hundred and twenty-three",
+   "noand": "one trillion, two hundred thirty-four billion, five hundred sixty-seven million, eight hundred ninety thousand, one hundred twenty-three"
+  },
+  {
+   "n": 912163,
+   "and": "nine hundred and twelve thousand, one hundred and sixty-three",
+   "noand": "nine hundred twelve thousand, one hundred sixty-three"
+  },
+  {
+   "n": 314465,
+   "and": "three hundred and fourteen thousand, four hundred and sixty-five",
+   "noand": "three hundred fourteen thousand, four hundred sixty-five"
+  },
+  {
+   "n": 493472,
+   "and": "four hundred and ninety-three thousand, four hundred and seventy-two",
+   "noand": "four hundred ninety-three thousand, four hundred seventy-two"
+  },
+  {
+   "n": 479518,
+   "and": "four hundred and seventy-nine thousand, five hundred and eighteen",
+   "noand": "four hundred seventy-nine thousand, five hundred eighteen"
+  },
+  {
+   "n": 762066,
+   "and": "seven hundred and sixty-two thousand and sixty-six",
+   "noand": "seven hundred sixty-two thousand sixty-six"
+  },
+  {
+   "n": 385695,
+   "and": "three hundred and eighty-five thousand, six hundred and ninety-five",
+   "noand": "three hundred eighty-five thousand, six hundred ninety-five"
+  },
+  {
+   "n": 52500,
+   "and": "fifty-two thousand, five hundred",
+   "noand": "fifty-two thousand, five hundred"
+  },
+  {
+   "n": 359086,
+   "and": "three hundred and fifty-nine thousand and eighty-six",
+   "noand": "three hundred fifty-nine thousand eighty-six"
+  },
+  {
+   "n": 5332,
+   "and": "five thousand, three hundred and thirty-two",
+   "noand": "five thousand, three hundred thirty-two"
+  },
+  {
+   "n": 477536,
+   "and": "four hundred and seventy-seven thousand, five hundred and thirty-six",
+   "noand": "four hundred seventy-seven thousand, five hundred thirty-six"
+  },
+  {
+   "n": 384502,
+   "and": "three hundred and eighty-four thousand, five hundred and two",
+   "noand": "three hundred eighty-four thousand, five hundred two"
+  },
+  {
+   "n": 345588,
+   "and": "three hundred and forty-five thousand, five hundred and eighty-eight",
+   "noand": "three hundred forty-five thousand, five hundred eighty-eight"
+  },
+  {
+   "n": 568704,
+   "and": "five hundred and sixty-eight thousand, seven hundred and four",
+   "noand": "five hundred sixty-eight thousand, seven hundred four"
+  },
+  {
+   "n": 755631,
+   "and": "seven hundred and fifty-five thousand, six hundred and thirty-one",
+   "noand": "seven hundred fifty-five thousand, six hundred thirty-one"
+  },
+  {
+   "n": 278601,
+   "and": "two hundred and seventy-eight thousand, six hundred and one",
+   "noand": "two hundred seventy-eight thousand, six hundred one"
+  },
+  {
+   "n": 238918,
+   "and": "two hundred and thirty-eight thousand, nine hundred and eighteen",
+   "noand": "two hundred thirty-eight thousand, nine hundred eighteen"
+  },
+  {
+   "n": 220985,
+   "and": "two hundred and twenty thousand, nine hundred and eighty-five",
+   "noand": "two hundred twenty thousand, nine hundred eighty-five"
+  },
+  {
+   "n": 588817,
+   "and": "five hundred and eighty-eight thousand, eight hundred and seventeen",
+   "noand": "five hundred eighty-eight thousand, eight hundred seventeen"
+  },
+  {
+   "n": 981698,
+   "and": "nine hundred and eighty-one thousand, six hundred and ninety-eight",
+   "noand": "nine hundred eighty-one thousand, six hundred ninety-eight"
+  },
+  {
+   "n": 77326,
+   "and": "seventy-seven thousand, three hundred and twenty-six",
+   "noand": "seventy-seven thousand, three hundred twenty-six"
+  },
+  {
+   "n": 251248,
+   "and": "two hundred and fifty-one thousand, two hundred and forty-eight",
+   "noand": "two hundred fifty-one thousand, two hundred forty-eight"
+  },
+  {
+   "n": 638649,
+   "and": "six hundred and thirty-eight thousand, six hundred and forty-nine",
+   "noand": "six hundred thirty-eight thousand, six hundred forty-nine"
+  },
+  {
+   "n": 968986,
+   "and": "nine hundred and sixty-eight thousand, nine hundred and eighty-six",
+   "noand": "nine hundred sixty-eight thousand, nine hundred eighty-six"
+  },
+  {
+   "n": 818336,
+   "and": "eight hundred and eighteen thousand, three hundred and thirty-six",
+   "noand": "eight hundred eighteen thousand, three hundred thirty-six"
+  },
+  {
+   "n": 336984,
+   "and": "three hundred and thirty-six thousand, nine hundred and eighty-four",
+   "noand": "three hundred thirty-six thousand, nine hundred eighty-four"
+  },
+  {
+   "n": 680011,
+   "and": "six hundred and eighty thousand and eleven",
+   "noand": "six hundred eighty thousand eleven"
+  },
+  {
+   "n": 250630,
+   "and": "two hundred and fifty thousand, six hundred and thirty",
+   "noand": "two hundred fifty thousand, six hundred thirty"
+  },
+  {
+   "n": 959934,
+   "and": "nine hundred and fifty-nine thousand, nine hundred and thirty-four",
+   "noand": "nine hundred fifty-nine thousand, nine hundred thirty-four"
+  },
+  {
+   "n": 566478,
+   "and": "five hundred and sixty-six thousand, four hundred and seventy-eight",
+   "noand": "five hundred sixty-six thousand, four hundred seventy-eight"
+  },
+  {
+   "n": 210002,
+   "and": "two hundred and ten thousand and two",
+   "noand": "two hundred ten thousand two"
+  },
+  {
+   "n": 942961,
+   "and": "nine hundred and forty-two thousand, nine hundred and sixty-one",
+   "noand": "nine hundred forty-two thousand, nine hundred sixty-one"
+  },
+  {
+   "n": 607111,
+   "and": "six hundred and seven thousand, one hundred and eleven",
+   "noand": "six hundred seven thousand, one hundred eleven"
+  },
+  {
+   "n": 522325,
+   "and": "five hundred and twenty-two thousand, three hundred and twenty-five",
+   "noand": "five hundred twenty-two thousand, three hundred twenty-five"
+  },
+  {
+   "n": 816210,
+   "and": "eight hundred and sixteen thousand, two hundred and ten",
+   "noand": "eight hundred sixteen thousand, two hundred ten"
+  },
+  {
+   "n": 50993,
+   "and": "fifty thousand, nine hundred and ninety-three",
+   "noand": "fifty thousand, nine hundred ninety-three"
+  },
+  {
+   "n": 308267,
+   "and": "three hundred and eight thousand, two hundred and sixty-seven",
+   "noand": "three hundred eight thousand, two hundred sixty-seven"
+  },
+  {
+   "n": 203280,
+   "and": "two hundred and three thousand, two hundred and eighty",
+   "noand": "two hundred three thousand, two hundred eighty"
+  },
+  {
+   "n": 536030,
+   "and": "five hundred and thirty-six thousand and thirty",
+   "noand": "five hundred thirty-six thousand thirty"
+  },
+  {
+   "n": 953704,
+   "and": "nine hundred and fifty-three thousand, seven hundred and four",
+   "noand": "nine hundred fifty-three thousand, seven hundred four"
+  },
+  {
+   "n": 930264,
+   "and": "nine hundred and thirty thousand, two hundred and sixty-four",
+   "noand": "nine hundred thirty thousand, two hundred sixty-four"
+  },
+  {
+   "n": 990771,
+   "and": "nine hundred and ninety thousand, seven hundred and seventy-one",
+   "noand": "nine hundred ninety thousand, seven hundred seventy-one"
+  },
+  {
+   "n": 928085,
+   "and": "nine hundred and twenty-eight thousand and eighty-five",
+   "noand": "nine hundred twenty-eight thousand eighty-five"
+  },
+  {
+   "n": 159036,
+   "and": "one hundred and fifty-nine thousand and thirty-six",
+   "noand": "one hundred fifty-nine thousand thirty-six"
+  },
+  {
+   "n": 75488,
+   "and": "seventy-five thousand, four hundred and eighty-eight",
+   "noand": "seventy-five thousand, four hundred eighty-eight"
+  },
+  {
+   "n": 497676,
+   "and": "four hundred and ninety-seven thousand, six hundred and seventy-six",
+   "noand": "four hundred ninety-seven thousand, six hundred seventy-six"
+  },
+  {
+   "n": 583693,
+   "and": "five hundred and eighty-three thousand, six hundred and ninety-three",
+   "noand": "five hundred eighty-three thousand, six hundred ninety-three"
+  },
+  {
+   "n": 431543,
+   "and": "four hundred and thirty-one thousand, five hundred and forty-three",
+   "noand": "four hundred thirty-one thousand, five hundred forty-three"
+  },
+  {
+   "n": 684085,
+   "and": "six hundred and eighty-four thousand and eighty-five",
+   "noand": "six hundred eighty-four thousand eighty-five"
+  },
+  {
+   "n": 940063,
+   "and": "nine hundred and forty thousand and sixty-three",
+   "noand": "nine hundred forty thousand sixty-three"
+  },
+  {
+   "n": 413040,
+   "and": "four hundred and thirteen thousand and forty",
+   "noand": "four hundred thirteen thousand forty"
+  },
+  {
+   "n": 96443,
+   "and": "ninety-six thousand, four hundred and forty-three",
+   "noand": "ninety-six thousand, four hundred forty-three"
+  },
+  {
+   "n": 818924,
+   "and": "eight hundred and eighteen thousand, nine hundred and twenty-four",
+   "noand": "eight hundred eighteen thousand, nine hundred twenty-four"
+  },
+  {
+   "n": 460809,
+   "and": "four hundred and sixty thousand, eight hundred and nine",
+   "noand": "four hundred sixty thousand, eight hundred nine"
+  },
+  {
+   "n": 862769,
+   "and": "eight hundred and sixty-two thousand, seven hundred and sixty-nine",
+   "noand": "eight hundred sixty-two thousand, seven hundred sixty-nine"
+  },
+  {
+   "n": 795210,
+   "and": "seven hundred and ninety-five thousand, two hundred and ten",
+   "noand": "seven hundred ninety-five thousand, two hundred ten"
+  },
+  {
+   "n": 795107,
+   "and": "seven hundred and ninety-five thousand, one hundred and seven",
+   "noand": "seven hundred ninety-five thousand, one hundred seven"
+  },
+  {
+   "n": 463523,
+   "and": "four hundred and sixty-three thousand, five hundred and twenty-three",
+   "noand": "four hundred sixty-three thousand, five hundred twenty-three"
+  },
+  {
+   "n": 603827,
+   "and": "six hundred and three thousand, eight hundred and twenty-seven",
+   "noand": "six hundred three thousand, eight hundred twenty-seven"
+  },
+  {
+   "n": 231681,
+   "and": "two hundred and thirty-one thousand, six hundred and eighty-one",
+   "noand": "two hundred thirty-one thousand, six hundred eighty-one"
+  },
+  {
+   "n": 299377,
+   "and": "two hundred and ninety-nine thousand, three hundred and seventy-seven",
+   "noand": "two hundred ninety-nine thousand, three hundred seventy-seven"
+  },
+  {
+   "n": 728112,
+   "and": "seven hundred and twenty-eight thousand, one hundred and twelve",
+   "noand": "seven hundred twenty-eight thousand, one hundred twelve"
+  },
+  {
+   "n": 419072,
+   "and": "four hundred and nineteen thousand and seventy-two",
+   "noand": "four hundred nineteen thousand seventy-two"
+  },
+  {
+   "n": 692581,
+   "and": "six hundred and ninety-two thousand, five hundred and eighty-one",
+   "noand": "six hundred ninety-two thousand, five hundred eighty-one"
+  },
+  {
+   "n": 921560,
+   "and": "nine hundred and twenty-one thousand, five hundred and sixty",
+   "noand": "nine hundred twenty-one thousand, five hundred sixty"
+  },
+  {
+   "n": 209189,
+   "and": "two hundred and nine thousand, one hundred and eighty-nine",
+   "noand": "two hundred nine thousand, one hundred eighty-nine"
+  },
+  {
+   "n": 903399,
+   "and": "nine hundred and three thousand, three hundred and ninety-nine",
+   "noand": "nine hundred three thousand, three hundred ninety-nine"
+  },
+  {
+   "n": 712251,
+   "and": "seven hundred and twelve thousand, two hundred and fifty-one",
+   "noand": "seven hundred twelve thousand, two hundred fifty-one"
+  },
+  {
+   "n": 210565,
+   "and": "two hundred and ten thousand, five hundred and sixty-five",
+   "noand": "two hundred ten thousand, five hundred sixty-five"
+  },
+  {
+   "n": 848562,
+   "and": "eight hundred and forty-eight thousand, five hundred and sixty-two",
+   "noand": "eight hundred forty-eight thousand, five hundred sixty-two"
+  },
+  {
+   "n": 662872,
+   "and": "six hundred and sixty-two thousand, eight hundred and seventy-two",
+   "noand": "six hundred sixty-two thousand, eight hundred seventy-two"
+  },
+  {
+   "n": 14634,
+   "and": "fourteen thousand, six hundred and thirty-four",
+   "noand": "fourteen thousand, six hundred thirty-four"
+  },
+  {
+   "n": 92561,
+   "and": "ninety-two thousand, five hundred and sixty-one",
+   "noand": "ninety-two thousand, five hundred sixty-one"
+  },
+  {
+   "n": 450131,
+   "and": "four hundred and fifty thousand, one hundred and thirty-one",
+   "noand": "four hundred fifty thousand, one hundred thirty-one"
+  },
+  {
+   "n": 735180,
+   "and": "seven hundred and thirty-five thousand, one hundred and eighty",
+   "noand": "seven hundred thirty-five thousand, one hundred eighty"
+  },
+  {
+   "n": 60342,
+   "and": "sixty thousand, three hundred and forty-two",
+   "noand": "sixty thousand, three hundred forty-two"
+  },
+  {
+   "n": 799108,
+   "and": "seven hundred and ninety-nine thousand, one hundred and eight",
+   "noand": "seven hundred ninety-nine thousand, one hundred eight"
+  },
+  {
+   "n": 344626,
+   "and": "three hundred and forty-four thousand, six hundred and twenty-six",
+   "noand": "three hundred forty-four thousand, six hundred twenty-six"
+  },
+  {
+   "n": 74081,
+   "and": "seventy-four thousand and eighty-one",
+   "noand": "seventy-four thousand eighty-one"
+  },
+  {
+   "n": 178300,
+   "and": "one hundred and seventy-eight thousand, three hundred",
+   "noand": "one hundred seventy-eight thousand, three hundred"
+  },
+  {
+   "n": 380617,
+   "and": "three hundred and eighty thousand, six hundred and seventeen",
+   "noand": "three hundred eighty thousand, six hundred seventeen"
+  },
+  {
+   "n": 784409,
+   "and": "seven hundred and eighty-four thousand, four hundred and nine",
+   "noand": "seven hundred eighty-four thousand, four hundred nine"
+  },
+  {
+   "n": 34159,
+   "and": "thirty-four thousand, one hundred and fifty-nine",
+   "noand": "thirty-four thousand, one hundred fifty-nine"
+  },
+  {
+   "n": 829781,
+   "and": "eight hundred and twenty-nine thousand, seven hundred and eighty-one",
+   "noand": "eight hundred twenty-nine thousand, seven hundred eighty-one"
+  },
+  {
+   "n": 14816,
+   "and": "fourteen thousand, eight hundred and sixteen",
+   "noand": "fourteen thousand, eight hundred sixteen"
+  },
+  {
+   "n": 348726,
+   "and": "three hundred and forty-eight thousand, seven hundred and twenty-six",
+   "noand": "three hundred forty-eight thousand, seven hundred twenty-six"
+  },
+  {
+   "n": 323866,
+   "and": "three hundred and twenty-three thousand, eight hundred and sixty-six",
+   "noand": "three hundred twenty-three thousand, eight hundred sixty-six"
+  },
+  {
+   "n": 662520,
+   "and": "six hundred and sixty-two thousand, five hundred and twenty",
+   "noand": "six hundred sixty-two thousand, five hundred twenty"
+  },
+  {
+   "n": 796004,
+   "and": "seven hundred and ninety-six thousand and four",
+   "noand": "seven hundred ninety-six thousand four"
+  },
+  {
+   "n": 965714,
+   "and": "nine hundred and sixty-five thousand, seven hundred and fourteen",
+   "noand": "nine hundred sixty-five thousand, seven hundred fourteen"
+  },
+  {
+   "n": 478882,
+   "and": "four hundred and seventy-eight thousand, eight hundred and eighty-two",
+   "noand": "four hundred seventy-eight thousand, eight hundred eighty-two"
+  },
+  {
+   "n": 291280,
+   "and": "two hundred and ninety-one thousand, two hundred and eighty",
+   "noand": "two hundred ninety-one thousand, two hundred eighty"
+  },
+  {
+   "n": 110997,
+   "and": "one hundred and ten thousand, nine hundred and ninety-seven",
+   "noand": "one hundred ten thousand, nine hundred ninety-seven"
+  },
+  {
+   "n": 570156,
+   "and": "five hundred and seventy thousand, one hundred and fifty-six",
+   "noand": "five hundred seventy thousand, one hundred fifty-six"
+  },
+  {
+   "n": 25637,
+   "and": "twenty-five thousand, six hundred and thirty-seven",
+   "noand": "twenty-five thousand, six hundred thirty-seven"
+  },
+  {
+   "n": 485339,
+   "and": "four hundred and eighty-five thousand, three hundred and thirty-nine",
+   "noand": "four hundred eighty-five thousand, three hundred thirty-nine"
+  },
+  {
+   "n": 370465,
+   "and": "three hundred and seventy thousand, four hundred and sixty-five",
+   "noand": "three hundred seventy thousand, four hundred sixty-five"
+  },
+  {
+   "n": 279457,
+   "and": "two hundred and seventy-nine thousand, four hundred and fifty-seven",
+   "noand": "two hundred seventy-nine thousand, four hundred fifty-seven"
+  },
+  {
+   "n": 777100,
+   "and": "seven hundred and seventy-seven thousand, one hundred",
+   "noand": "seven hundred seventy-seven thousand, one hundred"
+  },
+  {
+   "n": 670516,
+   "and": "six hundred and seventy thousand, five hundred and sixteen",
+   "noand": "six hundred seventy thousand, five hundred sixteen"
+  },
+  {
+   "n": 736784,
+   "and": "seven hundred and thirty-six thousand, seven hundred and eighty-four",
+   "noand": "seven hundred thirty-six thousand, seven hundred eighty-four"
+  },
+  {
+   "n": 829973,
+   "and": "eight hundred and twenty-nine thousand, nine hundred and seventy-three",
+   "noand": "eight hundred twenty-nine thousand, nine hundred seventy-three"
+  },
+  {
+   "n": 87447,
+   "and": "eighty-seven thousand, four hundred and forty-seven",
+   "noand": "eighty-seven thousand, four hundred forty-seven"
+  },
+  {
+   "n": 636388,
+   "and": "six hundred and thirty-six thousand, three hundred and eighty-eight",
+   "noand": "six hundred thirty-six thousand, three hundred eighty-eight"
+  },
+  {
+   "n": 252576,
+   "and": "two hundred and fifty-two thousand, five hundred and seventy-six",
+   "noand": "two hundred fifty-two thousand, five hundred seventy-six"
+  },
+  {
+   "n": 759900,
+   "and": "seven hundred and fifty-nine thousand, nine hundred",
+   "noand": "seven hundred fifty-nine thousand, nine hundred"
+  },
+  {
+   "n": 938738,
+   "and": "nine hundred and thirty-eight thousand, seven hundred and thirty-eight",
+   "noand": "nine hundred thirty-eight thousand, seven hundred thirty-eight"
+  },
+  {
+   "n": 935058,
+   "and": "nine hundred and thirty-five thousand and fifty-eight",
+   "noand": "nine hundred thirty-five thousand fifty-eight"
+  },
+  {
+   "n": 578742,
+   "and": "five hundred and seventy-eight thousand, seven hundred and forty-two",
+   "noand": "five hundred seventy-eight thousand, seven hundred forty-two"
+  },
+  {
+   "n": 461669,
+   "and": "four hundred and sixty-one thousand, six hundred and sixty-nine",
+   "noand": "four hundred sixty-one thousand, six hundred sixty-nine"
+  },
+  {
+   "n": 909194,
+   "and": "nine hundred and nine thousand, one hundred and ninety-four",
+   "noand": "nine hundred nine thousand, one hundred ninety-four"
+  },
+  {
+   "n": 319869,
+   "and": "three hundred and nineteen thousand, eight hundred and sixty-nine",
+   "noand": "three hundred nineteen thousand, eight hundred sixty-nine"
+  },
+  {
+   "n": 392585,
+   "and": "three hundred and ninety-two thousand, five hundred and eighty-five",
+   "noand": "three hundred ninety-two thousand, five hundred eighty-five"
+  },
+  {
+   "n": 156842,
+   "and": "one hundred and fifty-six thousand, eight hundred and forty-two",
+   "noand": "one hundred fifty-six thousand, eight hundred forty-two"
+  },
+  {
+   "n": 394821,
+   "and": "three hundred and ninety-four thousand, eight hundred and twenty-one",
+   "noand": "three hundred ninety-four thousand, eight hundred twenty-one"
+  },
+  {
+   "n": 128267,
+   "and": "one hundred and twenty-eight thousand, two hundred and sixty-seven",
+   "noand": "one hundred twenty-eight thousand, two hundred sixty-seven"
+  },
+  {
+   "n": 979467,
+   "and": "nine hundred and seventy-nine thousand, four hundred and sixty-seven",
+   "noand": "nine hundred seventy-nine thousand, four hundred sixty-seven"
+  },
+  {
+   "n": 557329,
+   "and": "five hundred and fifty-seven thousand, three hundred and twenty-nine",
+   "noand": "five hundred fifty-seven thousand, three hundred twenty-nine"
+  },
+  {
+   "n": 114276,
+   "and": "one hundred and fourteen thousand, two hundred and seventy-six",
+   "noand": "one hundred fourteen thousand, two hundred seventy-six"
+  },
+  {
+   "n": 671910,
+   "and": "six hundred and seventy-one thousand, nine hundred and ten",
+   "noand": "six hundred seventy-one thousand, nine hundred ten"
+  },
+  {
+   "n": 717453,
+   "and": "seven hundred and seventeen thousand, four hundred and fifty-three",
+   "noand": "seven hundred seventeen thousand, four hundred fifty-three"
+  },
+  {
+   "n": 235353618,
+   "and": "two hundred and thirty-five million, three hundred and fifty-three thousand, six hundred and eighteen",
+   "noand": "two hundred thirty-five million, three hundred fifty-three thousand, six hundred eighteen"
+  },
+  {
+   "n": 49550962,
+   "and": "forty-nine million, five hundred and fifty thousand, nine hundred and sixty-two",
+   "noand": "forty-nine million, five hundred fifty thousand, nine hundred sixty-two"
+  },
+  {
+   "n": 987024172,
+   "and": "nine hundred and eighty-seven million, twenty-four thousand, one hundred and seventy-two",
+   "noand": "nine hundred eighty-seven million, twenty-four thousand, one hundred seventy-two"
+  },
+  {
+   "n": 841169926,
+   "and": "eight hundred and forty-one million, one hundred and sixty-nine thousand, nine hundred and twenty-six",
+   "noand": "eight hundred forty-one million, one hundred sixty-nine thousand, nine hundred twenty-six"
+  },
+  {
+   "n": 996257799,
+   "and": "nine hundred and ninety-six million, two hundred and fifty-seven thousand, seven hundred and ninety-nine",
+   "noand": "nine hundred ninety-six million, two hundred fifty-seven thousand, seven hundred ninety-nine"
+  },
+  {
+   "n": 96590068,
+   "and": "ninety-six million, five hundred and ninety thousand and sixty-eight",
+   "noand": "ninety-six million, five hundred ninety thousand sixty-eight"
+  },
+  {
+   "n": 927397968,
+   "and": "nine hundred and twenty-seven million, three hundred and ninety-seven thousand, nine hundred and sixty-eight",
+   "noand": "nine hundred twenty-seven million, three hundred ninety-seven thousand, nine hundred sixty-eight"
+  },
+  {
+   "n": 898896064,
+   "and": "eight hundred and ninety-eight million, eight hundred and ninety-six thousand and sixty-four",
+   "noand": "eight hundred ninety-eight million, eight hundred ninety-six thousand sixty-four"
+  },
+  {
+   "n": 660408885,
+   "and": "six hundred and sixty million, four hundred and eight thousand, eight hundred and eighty-five",
+   "noand": "six hundred sixty million, four hundred eight thousand, eight hundred eighty-five"
+  },
+  {
+   "n": 96450350,
+   "and": "ninety-six million, four hundred and fifty thousand, three hundred and fifty",
+   "noand": "ninety-six million, four hundred fifty thousand, three hundred fifty"
+  },
+  {
+   "n": 843666618,
+   "and": "eight hundred and forty-three million, six hundred and sixty-six thousand, six hundred and eighteen",
+   "noand": "eight hundred forty-three million, six hundred sixty-six thousand, six hundred eighteen"
+  },
+  {
+   "n": 79935985,
+   "and": "seventy-nine million, nine hundred and thirty-five thousand, nine hundred and eighty-five",
+   "noand": "seventy-nine million, nine hundred thirty-five thousand, nine hundred eighty-five"
+  },
+  {
+   "n": 833510720,
+   "and": "eight hundred and thirty-three million, five hundred and ten thousand, seven hundred and twenty",
+   "noand": "eight hundred thirty-three million, five hundred ten thousand, seven hundred twenty"
+  },
+  {
+   "n": 98045267,
+   "and": "ninety-eight million, forty-five thousand, two hundred and sixty-seven",
+   "noand": "ninety-eight million, forty-five thousand, two hundred sixty-seven"
+  },
+  {
+   "n": 951741358,
+   "and": "nine hundred and fifty-one million, seven hundred and forty-one thousand, three hundred and fifty-eight",
+   "noand": "nine hundred fifty-one million, seven hundred forty-one thousand, three hundred fifty-eight"
+  },
+  {
+   "n": 450218776,
+   "and": "four hundred and fifty million, two hundred and eighteen thousand, seven hundred and seventy-six",
+   "noand": "four hundred fifty million, two hundred eighteen thousand, seven hundred seventy-six"
+  },
+  {
+   "n": 67208396,
+   "and": "sixty-seven million, two hundred and eight thousand, three hundred and ninety-six",
+   "noand": "sixty-seven million, two hundred eight thousand, three hundred ninety-six"
+  },
+  {
+   "n": 976264654,
+   "and": "nine hundred and seventy-six million, two hundred and sixty-four thousand, six hundred and fifty-four",
+   "noand": "nine hundred seventy-six million, two hundred sixty-four thousand, six hundred fifty-four"
+  },
+  {
+   "n": 770112960,
+   "and": "seven hundred and seventy million, one hundred and twelve thousand, nine hundred and sixty",
+   "noand": "seven hundred seventy million, one hundred twelve thousand, nine hundred sixty"
+  },
+  {
+   "n": 223476941,
+   "and": "two hundred and twenty-three million, four hundred and seventy-six thousand, nine hundred and forty-one",
+   "noand": "two hundred twenty-three million, four hundred seventy-six thousand, nine hundred forty-one"
+  },
+  {
+   "n": 975348515,
+   "and": "nine hundred and seventy-five million, three hundred and forty-eight thousand, five hundred and fifteen",
+   "noand": "nine hundred seventy-five million, three hundred forty-eight thousand, five hundred fifteen"
+  },
+  {
+   "n": 784517680,
+   "and": "seven hundred and eighty-four million, five hundred and seventeen thousand, six hundred and eighty",
+   "noand": "seven hundred eighty-four million, five hundred seventeen thousand, six hundred eighty"
+  },
+  {
+   "n": 44017299,
+   "and": "forty-four million, seventeen thousand, two hundred and ninety-nine",
+   "noand": "forty-four million, seventeen thousand, two hundred ninety-nine"
+  },
+  {
+   "n": 989037118,
+   "and": "nine hundred and eighty-nine million, thirty-seven thousand, one hundred and eighteen",
+   "noand": "nine hundred eighty-nine million, thirty-seven thousand, one hundred eighteen"
+  },
+  {
+   "n": 790325297,
+   "and": "seven hundred and ninety million, three hundred and twenty-five thousand, two hundred and ninety-seven",
+   "noand": "seven hundred ninety million, three hundred twenty-five thousand, two hundred ninety-seven"
+  },
+  {
+   "n": 636714623,
+   "and": "six hundred and thirty-six million, seven hundred and fourteen thousand, six hundred and twenty-three",
+   "noand": "six hundred thirty-six million, seven hundred fourteen thousand, six hundred twenty-three"
+  },
+  {
+   "n": 240741149,
+   "and": "two hundred and forty million, seven hundred and forty-one thousand, one hundred and forty-nine",
+   "noand": "two hundred forty million, seven hundred forty-one thousand, one hundred forty-nine"
+  },
+  {
+   "n": 825147654,
+   "and": "eight hundred and twenty-five million, one hundred and forty-seven thousand, six hundred and fifty-four",
+   "noand": "eight hundred twenty-five million, one hundred forty-seven thousand, six hundred fifty-four"
+  },
+  {
+   "n": 484005744,
+   "and": "four hundred and eighty-four million, five thousand, seven hundred and forty-four",
+   "noand": "four hundred eighty-four million, five thousand, seven hundred forty-four"
+  },
+  {
+   "n": 623514451,
+   "and": "six hundred and twenty-three million, five hundred and fourteen thousand, four hundred and fifty-one",
+   "noand": "six hundred twenty-three million, five hundred fourteen thousand, four hundred fifty-one"
+  },
+  {
+   "n": 511377046,
+   "and": "five hundred and eleven million, three hundred and seventy-seven thousand and forty-six",
+   "noand": "five hundred eleven million, three hundred seventy-seven thousand forty-six"
+  },
+  {
+   "n": 938745153,
+   "and": "nine hundred and thirty-eight million, seven hundred and forty-five thousand, one hundred and fifty-three",
+   "noand": "nine hundred thirty-eight million, seven hundred forty-five thousand, one hundred fifty-three"
+  },
+  {
+   "n": 17075922,
+   "and": "seventeen million, seventy-five thousand, nine hundred and twenty-two",
+   "noand": "seventeen million, seventy-five thousand, nine hundred twenty-two"
+  },
+  {
+   "n": 591887221,
+   "and": "five hundred and ninety-one million, eight hundred and eighty-seven thousand, two hundred and twenty-one",
+   "noand": "five hundred ninety-one million, eight hundred eighty-seven thousand, two hundred twenty-one"
+  },
+  {
+   "n": 941905055,
+   "and": "nine hundred and forty-one million, nine hundred and five thousand and fifty-five",
+   "noand": "nine hundred forty-one million, nine hundred five thousand fifty-five"
+  },
+  {
+   "n": 716488010,
+   "and": "seven hundred and sixteen million, four hundred and eighty-eight thousand and ten",
+   "noand": "seven hundred sixteen million, four hundred eighty-eight thousand ten"
+  },
+  {
+   "n": 970141524,
+   "and": "nine hundred and seventy million, one hundred and forty-one thousand, five hundred and twenty-four",
+   "noand": "nine hundred seventy million, one hundred forty-one thousand, five hundred twenty-four"
+  },
+  {
+   "n": 508916740,
+   "and": "five hundred and eight million, nine hundred and sixteen thousand, seven hundred and forty",
+   "noand": "five hundred eight million, nine hundred sixteen thousand, seven hundred forty"
+  },
+  {
+   "n": 725863258,
+   "and": "seven hundred and twenty-five million, eight hundred and sixty-three thousand, two hundred and fifty-eight",
+   "noand": "seven hundred twenty-five million, eight hundred sixty-three thousand, two hundred fifty-eight"
+  },
+  {
+   "n": 218829359,
+   "and": "two hundred and eighteen million, eight hundred and twenty-nine thousand, three hundred and fifty-nine",
+   "noand": "two hundred eighteen million, eight hundred twenty-nine thousand, three hundred fifty-nine"
+  },
+  {
+   "n": 2403087,
+   "and": "two million, four hundred and three thousand and eighty-seven",
+   "noand": "two million, four hundred three thousand eighty-seven"
+  },
+  {
+   "n": 174170523,
+   "and": "one hundred and seventy-four million, one hundred and seventy thousand, five hundred and twenty-three",
+   "noand": "one hundred seventy-four million, one hundred seventy thousand, five hundred twenty-three"
+  },
+  {
+   "n": 185166497,
+   "and": "one hundred and eighty-five million, one hundred and sixty-six thousand, four hundred and ninety-seven",
+   "noand": "one hundred eighty-five million, one hundred sixty-six thousand, four hundred ninety-seven"
+  },
+  {
+   "n": 395103995,
+   "and": "three hundred and ninety-five million, one hundred and three thousand, nine hundred and ninety-five",
+   "noand": "three hundred ninety-five million, one hundred three thousand, nine hundred ninety-five"
+  },
+  {
+   "n": 79447379,
+   "and": "seventy-nine million, four hundred and forty-seven thousand, three hundred and seventy-nine",
+   "noand": "seventy-nine million, four hundred forty-seven thousand, three hundred seventy-nine"
+  },
+  {
+   "n": 386191396,
+   "and": "three hundred and eighty-six million, one hundred and ninety-one thousand, three hundred and ninety-six",
+   "noand": "three hundred eighty-six million, one hundred ninety-one thousand, three hundred ninety-six"
+  },
+  {
+   "n": 205634115,
+   "and": "two hundred and five million, six hundred and thirty-four thousand, one hundred and fifteen",
+   "noand": "two hundred five million, six hundred thirty-four thousand, one hundred fifteen"
+  },
+  {
+   "n": 365480107,
+   "and": "three hundred and sixty-five million, four hundred and eighty thousand, one hundred and seven",
+   "noand": "three hundred sixty-five million, four hundred eighty thousand, one hundred seven"
+  },
+  {
+   "n": 243173730,
+   "and": "two hundred and forty-three million, one hundred and seventy-three thousand, seven hundred and thirty",
+   "noand": "two hundred forty-three million, one hundred seventy-three thousand, seven hundred thirty"
+  },
+  {
+   "n": 619416381,
+   "and": "six hundred and nineteen million, four hundred and sixteen thousand, three hundred and eighty-one",
+   "noand": "six hundred nineteen million, four hundred sixteen thousand, three hundred eighty-one"
+  },
+  {
+   "n": 83054449,
+   "and": "eighty-three million, fifty-four thousand, four hundred and forty-nine",
+   "noand": "eighty-three million, fifty-four thousand, four hundred forty-nine"
+  },
+  {
+   "n": 793102750,
+   "and": "seven hundred and ninety-three million, one hundred and two thousand, seven hundred and fifty",
+   "noand": "seven hundred ninety-three million, one hundred two thousand, seven hundred fifty"
+  },
+  {
+   "n": 425802128,
+   "and": "four hundred and twenty-five million, eight hundred and two thousand, one hundred and twenty-eight",
+   "noand": "four hundred twenty-five million, eight hundred two thousand, one hundred twenty-eight"
+  },
+  {
+   "n": 919227593,
+   "and": "nine hundred and nineteen million, two hundred and twenty-seven thousand, five hundred and ninety-three",
+   "noand": "nine hundred nineteen million, two hundred twenty-seven thousand, five hundred ninety-three"
+  },
+  {
+   "n": 731202374,
+   "and": "seven hundred and thirty-one million, two hundred and two thousand, three hundred and seventy-four",
+   "noand": "seven hundred thirty-one million, two hundred two thousand, three hundred seventy-four"
+  },
+  {
+   "n": 914735996,
+   "and": "nine hundred and fourteen million, seven hundred and thirty-five thousand, nine hundred and ninety-six",
+   "noand": "nine hundred fourteen million, seven hundred thirty-five thousand, nine hundred ninety-six"
+  },
+  {
+   "n": 861635254,
+   "and": "eight hundred and sixty-one million, six hundred and thirty-five thousand, two hundred and fifty-four",
+   "noand": "eight hundred sixty-one million, six hundred thirty-five thousand, two hundred fifty-four"
+  },
+  {
+   "n": 447287882,
+   "and": "four hundred and forty-seven million, two hundred and eighty-seven thousand, eight hundred and eighty-two",
+   "noand": "four hundred forty-seven million, two hundred eighty-seven thousand, eight hundred eighty-two"
+  },
+  {
+   "n": 786122985,
+   "and": "seven hundred and eighty-six million, one hundred and twenty-two thousand, nine hundred and eighty-five",
+   "noand": "seven hundred eighty-six million, one hundred twenty-two thousand, nine hundred eighty-five"
+  },
+  {
+   "n": 904418571,
+   "and": "nine hundred and four million, four hundred and eighteen thousand, five hundred and seventy-one",
+   "noand": "nine hundred four million, four hundred eighteen thousand, five hundred seventy-one"
+  },
+  {
+   "n": 863967127599,
+   "and": "eight hundred and sixty-three billion, nine hundred and sixty-seven million, one hundred and twenty-seven thousand, five hundred and ninety-nine",
+   "noand": "eight hundred sixty-three billion, nine hundred sixty-seven million, one hundred twenty-seven thousand, five hundred ninety-nine"
+  },
+  {
+   "n": 337170081672,
+   "and": "three hundred and thirty-seven billion, one hundred and seventy million, eighty-one thousand, six hundred and seventy-two",
+   "noand": "three hundred thirty-seven billion, one hundred seventy million, eighty-one thousand, six hundred seventy-two"
+  },
+  {
+   "n": 132781667897,
+   "and": "one hundred and thirty-two billion, seven hundred and eighty-one million, six hundred and sixty-seven thousand, eight hundred and ninety-seven",
+   "noand": "one hundred thirty-two billion, seven hundred eighty-one million, six hundred sixty-seven thousand, eight hundred ninety-seven"
+  },
+  {
+   "n": 982130996867,
+   "and": "nine hundred and eighty-two billion, one hundred and thirty million, nine hundred and ninety-six thousand, eight hundred and sixty-seven",
+   "noand": "nine hundred eighty-two billion, one hundred thirty million, nine hundred ninety-six thousand, eight hundred sixty-seven"
+  },
+  {
+   "n": 989935133988,
+   "and": "nine hundred and eighty-nine billion, nine hundred and thirty-five million, one hundred and thirty-three thousand, nine hundred and eighty-eight",
+   "noand": "nine hundred eighty-nine billion, nine hundred thirty-five million, one hundred thirty-three thousand, nine hundred eighty-eight"
+  },
+  {
+   "n": 142566035976,
+   "and": "one hundred and forty-two billion, five hundred and sixty-six million, thirty-five thousand, nine hundred and seventy-six",
+   "noand": "one hundred forty-two billion, five hundred sixty-six million, thirty-five thousand, nine hundred seventy-six"
+  },
+  {
+   "n": 900709876073,
+   "and": "nine hundred billion, seven hundred and nine million, eight hundred and seventy-six thousand and seventy-three",
+   "noand": "nine hundred billion, seven hundred nine million, eight hundred seventy-six thousand seventy-three"
+  },
+  {
+   "n": 726110400144,
+   "and": "seven hundred and twenty-six billion, one hundred and ten million, four hundred thousand, one hundred and forty-four",
+   "noand": "seven hundred twenty-six billion, one hundred ten million, four hundred thousand, one hundred forty-four"
+  },
+  {
+   "n": 481804445024,
+   "and": "four hundred and eighty-one billion, eight hundred and four million, four hundred and forty-five thousand and twenty-four",
+   "noand": "four hundred eighty-one billion, eight hundred four million, four hundred forty-five thousand twenty-four"
+  },
+  {
+   "n": 454139897921,
+   "and": "four hundred and fifty-four billion, one hundred and thirty-nine million, eight hundred and ninety-seven thousand, nine hundred and twenty-one",
+   "noand": "four hundred fifty-four billion, one hundred thirty-nine million, eight hundred ninety-seven thousand, nine hundred twenty-one"
+  },
+  {
+   "n": 489818035026,
+   "and": "four hundred and eighty-nine billion, eight hundred and eighteen million, thirty-five thousand and twenty-six",
+   "noand": "four hundred eighty-nine billion, eight hundred eighteen million, thirty-five thousand twenty-six"
+  },
+  {
+   "n": 495760752373,
+   "and": "four hundred and ninety-five billion, seven hundred and sixty million, seven hundred and fifty-two thousand, three hundred and seventy-three",
+   "noand": "four hundred ninety-five billion, seven hundred sixty million, seven hundred fifty-two thousand, three hundred seventy-three"
+  },
+  {
+   "n": 478073916224,
+   "and": "four hundred and seventy-eight billion, seventy-three million, nine hundred and sixteen thousand, two hundred and twenty-four",
+   "noand": "four hundred seventy-eight billion, seventy-three million, nine hundred sixteen thousand, two hundred twenty-four"
+  },
+  {
+   "n": 930005283339,
+   "and": "nine hundred and thirty billion, five million, two hundred and eighty-three thousand, three hundred and thirty-nine",
+   "noand": "nine hundred thirty billion, five million, two hundred eighty-three thousand, three hundred thirty-nine"
+  },
+  {
+   "n": 682693029234,
+   "and": "six hundred and eighty-two billion, six hundred and ninety-three million, twenty-nine thousand, two hundred and thirty-four",
+   "noand": "six hundred eighty-two billion, six hundred ninety-three million, twenty-nine thousand, two hundred thirty-four"
+  },
+  {
+   "n": 263968743345,
+   "and": "two hundred and sixty-three billion, nine hundred and sixty-eight million, seven hundred and forty-three thousand, three hundred and forty-five",
+   "noand": "two hundred sixty-three billion, nine hundred sixty-eight million, seven hundred forty-three thousand, three hundred forty-five"
+  },
+  {
+   "n": 684912162310,
+   "and": "six hundred and eighty-four billion, nine hundred and twelve million, one hundred and sixty-two thousand, three hundred and ten",
+   "noand": "six hundred eighty-four billion, nine hundred twelve million, one hundred sixty-two thousand, three hundred ten"
+  },
+  {
+   "n": 203980055144,
+   "and": "two hundred and three billion, nine hundred and eighty million, fifty-five thousand, one hundred and forty-four",
+   "noand": "two hundred three billion, nine hundred eighty million, fifty-five thousand, one hundred forty-four"
+  },
+  {
+   "n": 125649749951,
+   "and": "one hundred and twenty-five billion, six hundred and forty-nine million, seven hundred and forty-nine thousand, nine hundred and fifty-one",
+   "noand": "one hundred twenty-five billion, six hundred forty-nine million, seven hundred forty-nine thousand, nine hundred fifty-one"
+  },
+  {
+   "n": 719993171156,
+   "and": "seven hundred and nineteen billion, nine hundred and ninety-three million, one hundred and seventy-one thousand, one hundred and fifty-six",
+   "noand": "seven hundred nineteen billion, nine hundred ninety-three million, one hundred seventy-one thousand, one hundred fifty-six"
+  },
+  {
+   "n": 652551632662,
+   "and": "six hundred and fifty-two billion, five hundred and fifty-one million, six hundred and thirty-two thousand, six hundred and sixty-two",
+   "noand": "six hundred fifty-two billion, five hundred fifty-one million, six hundred thirty-two thousand, six hundred sixty-two"
+  },
+  {
+   "n": 992520648010,
+   "and": "nine hundred and ninety-two billion, five hundred and twenty million, six hundred and forty-eight thousand and ten",
+   "noand": "nine hundred ninety-two billion, five hundred twenty million, six hundred forty-eight thousand ten"
+  },
+  {
+   "n": 801528637466,
+   "and": "eight hundred and one billion, five hundred and twenty-eight million, six hundred and thirty-seven thousand, four hundred and sixty-six",
+   "noand": "eight hundred one billion, five hundred twenty-eight million, six hundred thirty-seven thousand, four hundred sixty-six"
+  },
+  {
+   "n": 839408875742,
+   "and": "eight hundred and thirty-nine billion, four hundred and eight million, eight hundred and seventy-five thousand, seven hundred and forty-two",
+   "noand": "eight hundred thirty-nine billion, four hundred eight million, eight hundred seventy-five thousand, seven hundred forty-two"
+  },
+  {
+   "n": 547747074349,
+   "and": "five hundred and forty-seven billion, seven hundred and forty-seven million, seventy-four thousand, three hundred and forty-nine",
+   "noand": "five hundred forty-seven billion, seven hundred forty-seven million, seventy-four thousand, three hundred forty-nine"
+  },
+  {
+   "n": 408047068512,
+   "and": "four hundred and eight billion, forty-seven million, sixty-eight thousand, five hundred and twelve",
+   "noand": "four hundred eight billion, forty-seven million, sixty-eight thousand, five hundred twelve"
+  },
+  {
+   "n": 398140044781,
+   "and": "three hundred and ninety-eight billion, one hundred and forty million, forty-four thousand, seven hundred and eighty-one",
+   "noand": "three hundred ninety-eight billion, one hundred forty million, forty-four thousand, seven hundred eighty-one"
+  },
+  {
+   "n": 511309021868,
+   "and": "five hundred and eleven billion, three hundred and nine million, twenty-one thousand, eight hundred and sixty-eight",
+   "noand": "five hundred eleven billion, three hundred nine million, twenty-one thousand, eight hundred sixty-eight"
+  },
+  {
+   "n": 526362481847,
+   "and": "five hundred and twenty-six billion, three hundred and sixty-two million, four hundred and eighty-one thousand, eight hundred and forty-seven",
+   "noand": "five hundred twenty-six billion, three hundred sixty-two million, four hundred eighty-one thousand, eight hundred forty-seven"
+  },
+  {
+   "n": 94756079834,
+   "and": "ninety-four billion, seven hundred and fifty-six million, seventy-nine thousand, eight hundred and thirty-four",
+   "noand": "ninety-four billion, seven hundred fifty-six million, seventy-nine thousand, eight hundred thirty-four"
+  }
+ ],
+ "ordinals": [
+  {
+   "word": "one",
+   "ordinal": "first"
+  },
+  {
+   "word": "two",
+   "ordinal": "second"
+  },
+  {
+   "word": "three",
+   "ordinal": "third"
+  },
+  {
+   "word": "four",
+   "ordinal": "fourth"
+  },
+  {
+   "word": "five",
+   "ordinal": "fifth"
+  },
+  {
+   "word": "six",
+   "ordinal": "sixth"
+  },
+  {
+   "word": "seven",
+   "ordinal": "seventh"
+  },
+  {
+   "word": "eight",
+   "ordinal": "eighth"
+  },
+  {
+   "word": "nine",
+   "ordinal": "ninth"
+  },
+  {
+   "word": "ten",
+   "ordinal": "tenth"
+  },
+  {
+   "word": "eleven",
+   "ordinal": "eleventh"
+  },
+  {
+   "word": "twelve",
+   "ordinal": "twelfth"
+  },
+  {
+   "word": "thirteen",
+   "ordinal": "thirteenth"
+  },
+  {
+   "word": "twenty",
+   "ordinal": "twentieth"
+  },
+  {
+   "word": "twenty-one",
+   "ordinal": "twenty-first"
+  },
+  {
+   "word": "thirty",
+   "ordinal": "thirtieth"
+  },
+  {
+   "word": "forty",
+   "ordinal": "fortieth"
+  },
+  {
+   "word": "one hundred",
+   "ordinal": "one hundredth"
+  },
+  {
+   "word": "one hundred and one",
+   "ordinal": "one hundred and first"
+  },
+  {
+   "word": "one hundred and twenty-one",
+   "ordinal": "one hundred and twenty-first"
+  },
+  {
+   "word": "one thousand",
+   "ordinal": "one thousandth"
+  }
+ ]
+}

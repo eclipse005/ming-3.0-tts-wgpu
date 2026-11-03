@@ -94,7 +94,7 @@ fn tn_normalize(text_in: &str) -> Result<String> {
         crate::tn::TalkerTn::load(&crate::tn::default_dir()).map_err(|e| e.to_string())
     });
     match tn {
-        Ok(tn) => tn.normalize(text_in),
+        Ok(tn) => tn.normalize_fragment(text_in),
         Err(e) => anyhow::bail!(
             "text normalisation needs the FST data ({e}); pass --no_text_normalization \
              or set MING_TN_DIR to a directory holding *_tagger.fst / *_verbalizer.fst"

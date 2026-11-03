@@ -422,25 +422,30 @@ ormalize_text_kit；--no_text_normalization 行为不变。
 因为 GCC 风格 flag 传给 MSVC 失败）。	ools/_tn_goldens.py 生成中文金标
 （goldens/tn_cases.json，89 条），cargo test --release matches_reference_goldens 对比
 **89/89 一致**。
+规则层已完整移植到 `src/tn/re.rs`（对照 `talker_re.py` + `re_utils/*` 逐条）：
 
-规则层已完整移植到 src/tn/re.rs（对照 	alker_re.py + 
-e_utils/* 逐条）：
-
-- 配置：	alker_re.json（money/measure_before/measure_after/serial_before/serial_after/
-  char_map0/proper_noun），随 FST 一起放 	n_data/；
-- 分词与合批：REChar/REDigit/REPunc 三类聚合、字符间隔 ≤3 的成组规则、SN 区段识别
-  （det 里的关键字与交替模式判定）；
+- 配置：`talker_re.json`（money/measure_before/measure_after/serial_before/serial_after/
+  char_map0/proper_noun），随 FST 一起放 `tn_data/`；
+- 分词与合批：`REChar`/`REDigit`/`REPunc` 三类聚合、字符间隔 ≤3 的成组规则、SN 区段识别
+  （`det` 里的关键字与交替模式判定）；
 - 形状评分 8 条：date/decimal/time/version/ip/frac/phone_dash/formula，按分数取最高、处理
-  -/~ 区间的拆分与「至」；
+  `-`/`~` 区间的拆分与「至」；
 - 单位绑定：money/measure 的前后缀、percent、serial、order，以及「等于」特例；
-- 标点折叠：merge_punc_measure / merge_punc_range（至/负/大约）；
-- 数字读法：d4_to_chi / 	o_string / 	o_string_rm0 / 	o_string_direct / 	o_string_yao。
+- 标点折叠：`merge_punc_measure` / `merge_punc_range`（至/负/大约）；
+- 数字读法：`d4_to_chi` / `to_string` / `to_string_rm0` / `to_string_direct` / `to_string_yao`。
 
-**还没移植**：
-umber_en.py（英文分支，依赖 inflect 的 number_to_words）。中文分支已与
-参考逐字一致；纯英文文本目前只经过 en FST（数字会逐位读，和参考的 
-ormalize_numbers
-不同）。## 1. 现状
+英文分支（`number_en.py`）也已移植（`src/tn/number_en.rs`）：九遍正则（千分位、单位、
+英镑/美元、分数、百分比、序数、版本号、裸数字、空白折叠）与 `inflect` 的
+`number_to_words` / `ordinal` 逐字对齐（千分位逗号、末组 <100 时的 and、连字符十位、
+序数变形）。措辞用 inflect 7.6.0 的值逐个校验：`goldens/number_en_words.json`（300+ 个
+数字 × and/noand + 21 个序数）、`goldens/number_en_cases.json`（25 条句子）。
+
+`TalkerTn::normalize_fragment` 按参考的 `_normalize_fragment` 先英文 `normalize_numbers`
+再进 TalkerTN，`prepare_text` 与两条推理路径都走它。完整金标 `goldens/tn_cases.json`：
+**97/97 一致**（67 中文 + 30 英文，含 URL/Markdown/引号/emoji 清理、`-5.5°C`、
+`gpt-3.5-turbo`、`1,234,567`、`£-150`、`1st/2nd/3rd`）。
+
+## 1. 现状
 
 | 验收项 | 状态 | 证据 |
 |---|---|---|
