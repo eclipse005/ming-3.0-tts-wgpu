@@ -1184,6 +1184,14 @@ impl CpuPipeline {
 /// producing the wrong voice.
 pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
     use crate::tasks;
+    // Same guard as the wgpu path: a .pt speaker embedding needs torch's
+    // serialisation format, which this port does not ship.
+    if !a.spk_emb_path.is_empty() && a.use_spk_emb {
+        bail!(
+            "--spk_emb_path needs a .pt reader, which this port does not ship yet; \
+             use --prompt_wav_path with --use_spk_emb instead"
+        );
+    }
     let tok = crate::tok::Tok::load(model_dir)?;
     let controls = {
         let c = tasks::Controls {

@@ -368,6 +368,33 @@ STYLE 多分片的首片重条件也已补齐（第 0 片生成后重新过 CAMP
 分片的参考），CPU 上 G2_empress 实测 **时长 1.0000 / rel 0.321 / mel 0.99733 / 音色 cos 0.9975**
 （GPU 基线 0.29 / 0.9991 / 0.9994，同一混沌类）。至此 --device cpu 与 GPU 路径的功能面一致。
 
+### 0.11 API / 功能面对齐（2026-11-03）
+
+三条路径（infer.py 原版、Rust+wGPU、Rust CPU）的 **CLI 参数面完全一致**（同一组 flag、
+同一默认值；--device 在原版 cuda:0|cpu 之外多了 igpu）。逐项行为：
+
+| 能力 | 原版 Python | Rust wGPU | Rust CPU |
+|---|---|---|---|
+| 8 种 task + 多语言 / 情感 / IP / 方言 / style / instruction | ✅ | ✅ | ✅ |
+| 分片 --max_length / --raw_text | ✅ | ✅ | ✅（共用 prepare_text） |
+| 克隆：--prompt_wav_path(+--prompt_text) | ✅ | ✅ | ✅（条件 2e-6 对齐） |
+| --use_spk_emb / --use_zero_spk_emb | ✅ | ✅ | ✅ |
+| 多参考 wav（
+args=+） | ✅ | ✅ | ✅ |
+| STYLE 多片首片重条件 | ✅ | ✅ | ✅ |
+| cfg / sigma / temperature / max_decode_steps / no_trim_silence / seed | ✅ | ✅ | ✅ |
+| 文本规范化（pynini FST） | ✅（本机缺 pynini 跑不了） | ❌ 仅 normalize_text_kit | ❌ 同左 |
+| --spk_emb_path（.pt） | ✅ | ❌ 明确报错 | ❌ 同一条报错 |
+| 流式推理 | 库里有，infer.py 未暴露 | ❌ | ❌ |
+
+最后三项是**移植版共同的缺口**，不是 CPU 独有的；其余在 CPU 上今日实测：A1 1.0000/1.79e-4/1.000000、
+A2 1.0000/6.3e-4/1.00000、G2（STYLE 2 片）1.0000/0.321/0.99733。
+
+**测试抖动注意**：全套 71 个测试在 P104 上偶发 Buffer with 'readback' label is invalid
+（不同测试、不同次，单测单跑 3/3 通过；核显上连跑稳定）。这是这张改造矿卡在持续负载下
+掉设备，不是代码回归；CI 可用 MING_DEVICE=igpu。MING_IN_FLIGHT 默认已降到 4（更深队列
+只快 ~2%）。
+
 ## 1. 现状
 
 | 验收项 | 状态 | 证据 |

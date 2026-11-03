@@ -75,10 +75,10 @@ fn max_in_flight() -> u32 {
         .filter(|v| *v > 0)
         .unwrap_or(MAX_IN_FLIGHT)
 }
-/// Submits kept in flight before a blocking wait. 16 overlaps the CPU's
-/// recording with the GPU's execution; the byte ceiling below bounds the live
-/// set.
-const MAX_IN_FLIGHT: u32 = 16;
+/// Submits kept in flight before a blocking wait. Four is enough to overlap the
+/// CPU's recording with the GPU's execution; deeper queues buy ~2% and showed
+/// rare device-lost flakes under full-suite load on the P104.
+const MAX_IN_FLIGHT: u32 = 4;
 /// ... and a byte ceiling, so the VAE decoder's multi-hundred-MB windows do not
 /// stack up on a small card.
 const MAX_INFLIGHT_BYTES: u64 = 512 << 20;
