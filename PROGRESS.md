@@ -336,6 +336,31 @@ dGPU 上一律是 35/36（F2 例外），A4/I4 另属 cache-free 参考口径（
 3.05 → **2.85 s**。**数值不受影响**：同一二进制 `MING_IN_FLIGHT=1/16` 的
 音频采样**逐位相同**（只有 WAV 里 PEAK 块的 1 字节时间戳不同），64/64 测试通过。
 
+### 0.10 CPU 后端（2026-11-03，手写 twin）
+
+--device cpu 以前走 wgpu 的 DX12 WARP，能跑但**输出全是 NaN**，而且比原版慢约 70×。
+现在 CPU 走的是**手写 Rust 后端**（src/cpu.rs，思路同 qwen3-asr-wgpu/src/cpu_decoder.rs）：
+f32 激活 + bf16 权重加载时展宽 + rayon 行并行 + 手写分块 GEMM，没有 NN 框架、不碰 wgpu。
+
+覆盖：Qwen2.5-0.5B（prefill + 增量解码 + stop head）、DiT+CFM（8 block、CFG 合批、10 步
+Euler）、aggregator、VAE 解码器（24 层因果滑窗 64 + iSTFT）。
+
+逐模块对拍（全部对着 Python 金标，CPU 与 GPU 同为 1e-6 量级）：
+
+| 阶段 | CPU 实测 | 门限 |
+|---|---:|---:|
+| LLM 40 步重放 worst z | **1.82e-6**（stop step 40 一致） | 1e-5 |
+| DiT block0 逐算子 | **2.2e-7 – 9.0e-7** | 2e-6 |
+| CFM 41 步 worst | **4.92e-6** | 1e-5 |
+| VAE 解码波形 | **2.39e-6** | 1e-4 |
+| 端到端 A1（对 params_test 参考） | 时长 1.0000、rel 1.79e-4、**log-mel 1.000000** | — |
+
+性能（Ultra 7 265K，20 核）：3.2 s 音频 **模型加载 3.0 s + 解码 6.28 s + VAE 0.69 s ≈ 7.0 s
+（RTF 2.2）**；同一句 Python CPU 是 **12.8–16.3 s（RTF 4.0–5.3）**，即 CPU 路径约 **2× 于原版**。
+
+还没做：**VAE 编码器**（prompt/克隆条件）——--device cpu 带 --prompt_wav_path/--use_spk_emb
+会明确报错而不是给错音色；STYLE 的首片重条件同理。
+
 ## 1. 现状
 
 | 验收项 | 状态 | 证据 |

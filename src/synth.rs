@@ -46,7 +46,7 @@ pub struct Args {
 
 /// Same split/normalise decision as ming_tts.prepare_text, minus the pynini TN
 /// (which the port deliberately does not carry: see PROGRESS.md).
-fn prepare_text(tok: &Tok, req: &tasks::SynthRequest, a: &Args) -> Result<Vec<String>> {
+pub(crate) fn prepare_text(tok: &Tok, req: &tasks::SynthRequest, a: &Args) -> Result<Vec<String>> {
     let _ = tok;
     if a.raw_text {
         return Ok(vec![req.text.clone()]);
@@ -182,6 +182,9 @@ pub fn run(a: Args) -> Result<()> {
     let reference_first_fragment = req.taskname == "STYLE" && fragments.len() > 1;
     let needs_encoder = need_prompt || reference_first_fragment;
     let mem = std::env::var("MING_MEM").is_ok();
+    if crate::gpu::DevicePref::parse(&a.device)? == crate::gpu::DevicePref::Cpu {
+        return crate::cpu::run(&a, model_dir);
+    }
     let mut pl = Pipeline::load_pref(
         model_dir,
         needs_encoder,

@@ -207,9 +207,184 @@ mod m1_tests {
         assert_eq!(stop_step, Some(40), "stop step must match python");
     }
 
+
     fn golden_last_z() -> Vec<f32> {
         let z = golden("m1_step_z.npy").unwrap();
         z.data[0..896].to_vec()
+    }
+}
+
+/// The hand-written CPU twin must satisfy the same M1 contract as the GPU
+/// engine: same per-step hidden (rel_l2 < 1e-5) and the same stop step.
+#[cfg(test)]
+mod cpu_tests {
+    use super::*;
+    use crate::cpu::CpuLlm;
+    use crate::weights::Weights;
+
+    #[test]
+    fn cpu_llm_replay_matches_python() {
+        let pre = golden("m1_prefill_embeds.npy").unwrap();
+        let step_in = golden("m1_step_inputs.npy").unwrap();
+        let step_z = golden("m1_step_z.npy").unwrap();
+        let step_p = golden("m1_step_prob.npy").unwrap();
+        let t = pre.shape[0];
+        let s = step_in.shape[0];
+
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let mut eng = CpuLlm::load(&weights).unwrap();
+
+        let (z0, prob0) = eng.prefill(&pre.data, t).unwrap();
+        let want0 = &step_z.data[0..896];
+        println!(
+            "prefill: z rel_l2={:.3e} prob={:.6} (py {:.6})",
+            rel_l2(&z0, want0),
+            prob0[1],
+            step_p.data[0]
+        );
+        assert!((prob0[1] - step_p.data[0]).abs() < 1e-4);
+
+        let mut worst_z = 0.0f32;
+        let mut worst_p = 0.0f32;
+        let mut stop_step = None;
+        for i in 0..s {
+            let (z, p) = eng.step(&step_in.data[i * 896..(i + 1) * 896], t + i).unwrap();
+            let want = &step_z.data[(i + 1) * 896..(i + 2) * 896];
+            let e = rel_l2(&z, want);
+            worst_z = worst_z.max(e);
+            worst_p = worst_p.max((p[1] - step_p.data[i + 1]).abs());
+            if stop_step.is_none() && p[1] > 0.5 && i + 1 > 3 {
+                stop_step = Some(i + 1);
+            }
+            if i < 2 || i + 1 == s {
+                println!("cpu step {}: z rel_l2={e:.3e} prob={:.6}", i + 1, p[1]);
+            }
+        }
+        println!("cpu worst z rel_l2={worst_z:.3e} worst prob abs={worst_p:.3e} stop={stop_step:?}");
+        assert!(worst_z < 1e-5, "cpu z rel_l2 {worst_z:.3e} >= 1e-5");
+        assert!(worst_p < 1e-4, "cpu prob abs {worst_p:.3e} >= 1e-4");
+        assert_eq!(stop_step, Some(40));
+    }
+}
+
+#[cfg(test)]
+mod cpu_dit_forward_tests {
+    use super::*;
+    use crate::cpu::CpuDit;
+    use crate::dit::DitEngine;
+    use crate::gpu::Gpu;
+    use crate::weights::Weights;
+
+    #[test]
+    fn cpu_pair_forward_matches_gpu() {
+        let dir = |n| std::path::Path::new(&std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
+            .join(n);
+        let z = read_npy(&dir("m2_z.npy")).unwrap();
+        let lh = read_npy(&dir("m2_lh.npy")).unwrap();
+        let noise = read_npy(&dir("m2_noise.npy")).unwrap();
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let cpu = CpuDit::load(&weights).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let eng = DitEngine::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
+        let a = cpu.forward_pair(&noise.data[..64], 0.0, &z.data[..896], &lh.data[..64]);
+        let xb = gpu.upload_f32(&noise.data[..64], "dbg.x");
+        let cb = gpu.upload_f32(&z.data[..896], "dbg.c");
+        let lhb = gpu.upload_f32(&lh.data[..64], "dbg.lh");
+        let out = eng.dit_forward_pair_dev(&xb, 0.0, &cb, &lhb).unwrap();
+        let g = gpu.read_f32(&out, 6 * 64).unwrap();
+        println!("cpu pred {:?}", &a[128..134]);
+        println!("gpu pred {:?}", &g[128..134]);
+        println!("pair rel_l2 = {:.3e}", rel_l2(&a, &g));
+        let single_cpu = cpu.forward_single(&noise.data[..64], 0.0, &z.data[..896], &lh.data[..64]);
+        let single_gpu = eng
+            .dit_forward(&noise.data[..64], 0.0, &z.data[..896], &lh.data[..64])
+            .unwrap();
+        println!("single cpu {:?}", &single_cpu[..4]);
+        println!("single gpu {:?}", &single_gpu[..4]);
+        println!("single rel_l2 = {:.3e}", rel_l2(&single_cpu, &single_gpu));
+        let parts_gpu = eng.block0_parts(&noise.data[..64], 0.0, &z.data[..896], &lh.data[..64]).unwrap();
+        let parts_cpu = cpu.block0_parts(&noise.data[..64], 0.0, &z.data[..896], &lh.data[..64]);
+        for ((name, pc), (_, pg)) in parts_cpu.iter().zip(parts_gpu.iter()) {
+            println!("  {name:8} rel_l2={:.3e}", rel_l2(pc, pg));
+        }
+    }
+}
+
+#[cfg(test)]
+mod cpu_vae_tests {
+    use super::*;
+    use crate::cpu::CpuVaeDec;
+    use crate::weights::Weights;
+
+    #[test]
+    fn cpu_vae_decode_matches_python() {
+        let latent = golden("m4_latent.npy").unwrap();
+        let fc1 = golden("m4_fc1_out.npy").unwrap();
+        let up = golden("m4_up_out.npy").unwrap();
+        let dec = golden("m4_dec_out.npy").unwrap();
+        let head = golden("m4_head_lin.npy").unwrap();
+        let wav = golden("m4_waveform.npy").unwrap();
+
+        let t_lat = latent.shape[0];
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let engine = CpuVaeDec::load(&weights).unwrap();
+        let (got_wav, parts) = engine.decode_parts(&latent.data, t_lat);
+        println!("fc1   rel_l2={:.3e}", rel_l2(&parts[0], &fc1.data));
+        println!("up    rel_l2={:.3e}", rel_l2(&parts[1], &up.data));
+        println!("dec   rel_l2={:.3e}", rel_l2(&parts[2], &dec.data));
+        println!("spec  rel_l2={:.3e}", rel_l2(&parts[3], &head.data));
+        println!("wav   rel_l2={:.3e}", rel_l2(&got_wav, &wav.data));
+        assert!(rel_l2(&got_wav, &wav.data) < 1e-4);
+    }
+}
+
+#[cfg(test)]
+mod cpu_dit_tests {
+    use super::*;
+    use crate::cpu::CpuDit;
+    use crate::weights::Weights;
+
+    #[test]
+    fn cpu_flowloss_matches_python() {
+        let dir = |n| std::path::Path::new(&std::env::var("MING_GOLDEN")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
+            .join(n);
+        let z = read_npy(&dir("m2_z.npy")).unwrap();
+        let lh = read_npy(&dir("m2_lh.npy")).unwrap();
+        let noise = read_npy(&dir("m2_noise.npy")).unwrap();
+        let sde = read_npy(&dir("m2_sde.npy")).unwrap();
+        let want = read_npy(&dir("m2_y_ref.npy")).unwrap();
+        let cfg = read_npy(&dir("m2_cfg.npy")).unwrap();
+        let steps = z.shape[0];
+        assert_eq!(steps, 41);
+
+        let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
+        let dit = CpuDit::load(&weights).unwrap();
+
+        let mut worst = 0.0f32;
+        let mut worst_i = 0usize;
+        for i in 0..steps {
+            let got = dit.sample(
+                &z.data[i * 896..(i + 1) * 896],
+                &lh.data[i * 64..(i + 1) * 64],
+                &noise.data[i * 64..(i + 1) * 64],
+                &sde.data[i * 640..(i + 1) * 640],
+                cfg.data[i],
+                0.25,
+                0.0,
+            );
+            let e = rel_l2(&got, &want.data[i * 64..(i + 1) * 64]);
+            if e > worst {
+                worst = e;
+                worst_i = i;
+            }
+            if i == 0 {
+                println!("cpu flow step0 rel_l2={e:.3e}");
+            }
+        }
+        println!("cpu flowloss worst rel_l2 = {worst:.3e} @ step {worst_i}");
+        assert!(worst < 1e-5, "cpu flowloss {worst:.3e} >= 1e-5");
     }
 }
 
