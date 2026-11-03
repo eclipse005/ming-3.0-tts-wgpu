@@ -308,8 +308,7 @@ t>8 的线性层（VAE 编码/解码、长 prefill）原来一律按 6-token 窗
 结论：两条路径按**适配器类别 + 是否回流**选。tile 的 K 归约序和窗口 kernel 不同，
 **只要它的输出会回到自回归环（prefill、VAE 编码），停止步就可能翻**（实测 S3/L=8.7 s：
 tile prefill 下 dur 0.9885，窗口下 1.0000）。所以默认只让 **VAE 解码器**（输出直接
-变成波形、不回流）走 tile；prefill/编码器一律窗口。`MING_PREFILL=tile` 可强制
-prefill 也走 tile（实验，会改轨迹）。
+变成波形、不回流）走 tile；prefill/编码器一律窗口——这条会改轨迹的实验路径已经删除。
 12-token 窗口则是**逐位中性**的（同一输入下 tok=6 与 tok=12 的 data 块字节相同），
 所以它可以在所有路径上默认开。
 tile 微内核仍值得重写（sb 用 vec4 共享布局、减少每 K tile 的 16 次标量 shared load），
@@ -318,8 +317,6 @@ tile 微内核仍值得重写（sb 用 vec4 共享布局、减少每 K tile 的 
 长句端到端（5.00 s 音频、63 latents、带 prompt）：
 - **P104（默认：decoder tile + 窗口 prefill）**：prefill 0.197 + DiT 1.89 + LLM/agg 0.66
   + VAE 0.25 + iSTFT 0.02 ≈ **3.00 s → RTF 0.60**（两次复测 2.746 s 解码环）；
-- P104 全 tile（`MING_PREFILL=tile`）：2.85 s / 0.57，但会改生成轨迹（S3 等）；
-- P104 全窗口：3.16 s / 0.63；
 - P104 强制窗口（`MING_PREFILL=base`）：3.47 s / 0.69；
 - 核显（窗口）：5.2–5.7 s / 1.04–1.14。
 
@@ -379,7 +376,7 @@ dGPU 上一律是 35/36（F2 例外），A4/I4 另属 cache-free 参考口径（
 | `MING_T6=v8\|v9\|v10\|v11\|v12\|v13\|v14` | 向量化 kernel 的行宽/行数/展开组合，默认 `v12`（8 lanes × 2 行 × 展开 2） |
 | `MING_T1=base\|half` | 回退单 token 路径（默认是向量化 2 行版；`half` 是旧的半 warp 版） |
 | `MING_T1=v1\|v2\|v3\|v4` | 单 token 变体，(8,64,1)/(8,128,1)/(8,128,2)/(16,128,1) |
-| `MING_PREFILL=tile\|base` | 强制 48×64 tile 开/关；默认随适配器类别（独显开、核显关），见 0.9.1 |
+| `MING_PREFILL=base` | 关掉 decoder 的 48×64 tile（默认随适配器类别：独显开、核显/CPU 关），见 0.9.1 |
 | `MING_T12=0` | 关闭 t>8 的 12-token 窗口，回到 6-token（A/B 用） |
 | `MING_IN_FLIGHT=<n>` | 允许的在飞 submit 数（默认 16；=1 表示每批都 wait，等价旧行为） |
 | `MING_STOP_TRACE=1` | 每步打印停止概率（排查时长差的唯一可靠手段） |

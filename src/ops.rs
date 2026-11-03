@@ -299,9 +299,6 @@ pub struct Ops {
     k_prefill_tile: crate::nn::Kernel,
     /// Tile allowed for post-hoc (decoder) linears: discrete GPUs only.
     prefill_tiled: bool,
-    /// `MING_PREFILL=tile`: also use the tile in prefill/encoder, which changes
-    /// the generation trajectory (experimental).
-    prefill_tile_all: bool,
     k_rope: crate::nn::Kernel,
     k_attend: crate::nn::Kernel,
     /// Reduction-free attention for software adapters (see ATTEND_SIMPLE).
@@ -382,12 +379,11 @@ impl Ops {
             // bound and needs a discrete GPU's FP32 throughput, while the
             // register-window kernel is bandwidth bound and wins on integrated
             // ones (measured: tile is 2x faster on a P104, 1.6x slower on an
-            // Intel UHD). `MING_PREFILL=tile|window` overrides for A/B.
+            // Intel UHD). `MING_PREFILL=base` forces the window kernel.
             prefill_tiled: match std::env::var("MING_PREFILL").ok().as_deref() {
-                Some("base") | Some("window") => false,
+                Some("base") => false,
                 _ => gpu.device_type == wgpu::DeviceType::DiscreteGpu,
             },
-            prefill_tile_all: std::env::var("MING_PREFILL").is_ok_and(|v| v == "tile"),
             t12: std::env::var("MING_T12").map_or(true, |v| v != "0"),
             k_rope: kernel(&gpu, shaders::ROPE, 2),
             k_attend: kernel(&gpu, shaders::ATTEND, 3),
@@ -583,17 +579,6 @@ impl Ops {
     }
 
     pub fn linear_into(&self, lin: &Lin, x: &Buffer, y: &Buffer, t: usize) {
-        // Experimental global override: MING_PREFILL=tile also routes prefill /
-        // encoder through the tile. That changes the generation trajectory (the
-        // kernel's K reduction order differs), so it is not the default.
-        if t > 8
-            && self.prefill_tile_all
-            && lin.rows % 64 == 0
-            && lin.in_features % 32 == 0
-        {
-            self.tile_chunks(lin, x, y, t);
-            return;
-        }
         // t > 8 (VAE decode/encode, long prefill): walk the batch in windows of
         // 12 tokens instead of 6. Same micro-kernel and register blocking, but
         // each weight read feeds twice as many tokens -- this halves the weight
