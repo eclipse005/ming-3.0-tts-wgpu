@@ -152,6 +152,8 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
         let latents = pl.decode_loop(
             &embeds,
             t,
+            prompt_latent.as_ref().map(|(l, _)| l.as_slice()),
+            latent_steps,
             &mut *rng,
             a.cfg as f32,
             a.sigma as f32,

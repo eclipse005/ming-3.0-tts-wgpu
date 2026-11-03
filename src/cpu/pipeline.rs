@@ -92,11 +92,13 @@ impl CpuPipeline {
 
     /// The autoregressive loop: LLM step -> CFM sample -> aggregator, until the
     /// stop head fires (same ordering and quirks as pipeline.rs).
-    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
+    #[allow(clippy::too_many_arguments)] // numeric knobs mirror the wgpu call
     pub fn decode_loop(
         &mut self,
         embeds: &[f32],
         t: usize,
+        prompt_latent: Option<&[f32]>,
+        prompt_frames: usize,
         noise: &mut dyn crate::pipeline::Noise,
         cfg: f32,
         sigma: f32,
@@ -109,7 +111,15 @@ impl CpuPipeline {
         }
         let steps = max_steps.min(budget);
         let (mut z, mut prob) = self.llm.prefill(embeds, t)?;
+        // Same conditioning as the wgpu path: the CFM history starts from the
+        // prompt's last latent frame, not from silence.
         let mut history = vec![0.0f32; ZC];
+        if let Some(pl) = prompt_latent {
+            if prompt_frames > 0 {
+                let start = (prompt_frames - 1) * ZC;
+                history.copy_from_slice(&pl[start..start + ZC]);
+            }
+        }
         let mut latents: Vec<f32> = Vec::new();
         for (step, pos) in (t..).take(steps).enumerate() {
             let nz = noise.draw(ZC);

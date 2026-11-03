@@ -462,7 +462,30 @@ ormalize_text_kit；--no_text_normalization 行为不变。
 - 实测：与 CAMPlus 路径同一向量对比，**只有 speaker 行不同，相对误差 2.0e-6**（Rust 与
   Python CAMPlus 的数值差），其余行完全一致；双文件（2 槽）与 dict 格式文件都跑通。
 
-## 1. 现状
+### 0.14 代码审查与清理（2026-11-03）
+
+按“死代码 / 结构冗余 / 最佳实践”做了一轮有证据的清理，逐项验证：
+
+- **安全**：`src/pt.rs` 的 ZIP 解析原来直接切片，截断或构造的 `.pt` 会 panic；现在走
+  `rd_u16/rd_u32` 边界检查、EOCD 扫描拒绝 <22 字节文件、pickle 读数全部用 checked
+  accessor；张量 strides 会校验，非连续张量明确报错而不是静默读错。新增畸形输入测试。
+- **死代码**：删掉未用的 `thiserror` 依赖、`Unpickler::{top_mut,memo_put}`、
+  `Tok::to_string_yao`、`tok::default_model_dir`；只被测试使用的 helper 全部 `#[cfg(test)]`
+  化（CPU 各阶段类型、spk 的 3 个便捷函数、VAE 分阶段探针、golden::rel_l2、weights 的两个诊断
+  方法、tok 的 dialect/vocab_size/new …）。16 处 blanket `#![allow(dead_code)]` 全部移除，
+  release 构建零 dead-code 警告。
+- **clippy**：90 条 → 0。`Gpu` 的 `Arc<RefCell/Cell>` 改 `Rc`（本来就不跨线程，原类型是
+  假线程安全）；`Ops::cfm_step` 的 11 个参数改 `CfmStep` 结构体；`Tok` 用 `Display` 取代
+  固有 `to_string`；合并相同分支、切片参数、`as_chunks`、`FlowTrace` 别名、文档注释修复。
+- **结构**：`cpu.rs` 从 1519 行拆成 `cpu/{tensor,llm,dit,vae,pipeline,run,mod}.rs`
+  （127–380 行/个）；`synth::Args` 直接派生 `clap::Args`，`main.rs` 用 `#[command(flatten)]`
+  ，删掉重复的 30 字段变体和 clone 全场参数的分支。
+
+审查还抓到一个**真实的对齐 bug**：wgpu 的 CFM `history` 用 prompt 最后一帧 latent 初始化，
+CPU 路径一直用零。修复后 CPU 克隆 A3 从 `dur 1.0312 / mel 0.91355 / spk 0.9606` 变成
+**`dur 1.0000 / rel 1.14e-3 / mel 1.00000 / spk 1.0000`**（GPU 基线 2.6e-3）。
+
+## 1. 现状## 1. 现状
 
 | 验收项 | 状态 | 证据 |
 |---|---|---|
