@@ -178,20 +178,30 @@ pub fn run(a: Args) -> Result<()> {
     };
 
     // ---- voice conditioning ------------------------------------------------
-    let mut spk_emb: Option<Vec<f32>> = None;
+    let mut spk_embs: Vec<Vec<f32>> = Vec::new();
     let mut prompt_latent: Option<(Vec<f32>, usize)> = None;
     let mut prompt_text = req.prompt_text.clone();
 
     let zero_spk = a.use_zero_spk_emb;
-    if a.use_zero_spk_emb {
-        // The reference still allocates one speaker slot; it is just zeroed
-        // after the projection.
-        spk_emb = Some(vec![0.0; 192]);
+    if zero_spk {
+        // The reference still allocates one speaker slot; it is zeroed after the
+        // projection. It also takes precedence over --spk_emb_path.
+        spk_embs.push(vec![0.0; 192]);
     }
 
-    if !a.spk_emb_path.is_empty() && a.use_spk_emb {
-        bail!("--spk_emb_path needs a .pt reader, which this port does not ship yet; \
-               use --prompt_wav_path with --use_spk_emb instead");
+    // Precomputed speaker vectors: one slot per .pt file, exactly like
+    // ming_tts._speaker_embeddings (last dim must be 192).
+    if a.use_spk_emb && !zero_spk && !a.spk_emb_path.is_empty() {
+        for path in &a.spk_emb_path {
+            let v = crate::pt::load_tensor(std::path::Path::new(path))?;
+            if v.len() != 192 {
+                bail!(
+                    "{path} holds a {}-dim embedding, expected 192",
+                    v.len()
+                );
+            }
+            spk_embs.push(v);
+        }
     }
 
     let need_prompt = !a.prompt_wav_path.is_empty() && prompt_text.is_some();
@@ -241,9 +251,9 @@ pub fn run(a: Args) -> Result<()> {
         }
         let all = at_44k;
 
-        if a.use_spk_emb && spk_emb.is_none() {
+        if a.use_spk_emb && spk_embs.is_empty() {
             let onnx = model_dir.join("campplus.onnx");
-            spk_emb = Some(
+            spk_embs.push(
                 spk::embed_16k_with(&onnx, &for_spk).context("campplus speaker embedding")?,
             );
         }
@@ -255,15 +265,15 @@ pub fn run(a: Args) -> Result<()> {
 
     // spk_head: 192 -> 896. Applied before the zeroing, exactly as in
     // BailingMM.prepare_input_embed.
-    let mut spk_row: Option<Vec<f32>> = match &spk_emb {
-        None => None,
-        Some(se) => {
-            if zero_spk {
-                Some(vec![0.0; 896])
-            } else {
-                Some(pl.project_speaker(se)?)
-            }
-        }
+    let mut spk_rows: Vec<Vec<f32>> = if spk_embs.is_empty() {
+        Vec::new()
+    } else if zero_spk {
+        spk_embs.iter().map(|_| vec![0.0; 896]).collect()
+    } else {
+        spk_embs
+            .iter()
+            .map(|se| pl.project_speaker(se))
+            .collect::<Result<Vec<_>>>()?
     };
 
     if prompt_latent.is_none() {
@@ -294,7 +304,7 @@ pub fn run(a: Args) -> Result<()> {
             &tok::InputSeqArgs {
                 prompt: &req.prompt,
                 text: fragment,
-                num_speakers: spk_row.is_some() as usize,
+                num_speakers: spk_rows.len(),
                 instruction: req.instruction.as_deref(),
                 prompt_text: if latent_rows.is_some() { prompt_text.as_deref() } else { None },
                 prompt_latent_steps: latent_steps,
@@ -314,8 +324,8 @@ pub fn run(a: Args) -> Result<()> {
             println!("ids -> {path} ({} tokens)", layout.input_ids.len());
         }
         let mut embeds = pl.embed_ids(&layout.input_ids)?;
-        if let Some(se) = &spk_row {
-            let pos = layout.speaker_positions[0];
+        for (slot, se) in spk_rows.iter().enumerate() {
+            let pos = layout.speaker_positions[slot];
             embeds[pos * 896..(pos + 1) * 896].copy_from_slice(&se[..]);
         }
         if let Some(rows) = &latent_rows {
@@ -385,7 +395,7 @@ pub fn run(a: Args) -> Result<()> {
             let onnx = model_dir.join("campplus.onnx");
             let se = spk::embed_16k_with(&onnx, &spk16)
                 .context("campplus speaker embedding of the generated prompt")?;
-            spk_row = Some(pl.project_speaker(&se)?);
+            spk_rows = vec![pl.project_speaker(&se)?];
             let (lat, n) = encode_prompt_latent(&pl, &mut *rng, &wav)?;
             latent_rows = Some(project_latent_rows(&pl, &lat, n)?);
             latent_steps = n;

@@ -1184,14 +1184,7 @@ impl CpuPipeline {
 /// producing the wrong voice.
 pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
     use crate::tasks;
-    // Same guard as the wgpu path: a .pt speaker embedding needs torch's
-    // serialisation format, which this port does not ship.
-    if !a.spk_emb_path.is_empty() && a.use_spk_emb {
-        bail!(
-            "--spk_emb_path needs a .pt reader, which this port does not ship yet; \
-             use --prompt_wav_path with --use_spk_emb instead"
-        );
-    }
+
     let tok = crate::tok::Tok::load(model_dir)?;
     let controls = {
         let c = tasks::Controls {
@@ -1225,7 +1218,7 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
         a.instruction_schema.as_deref(),
         a.prompt_wav_path.first().map(|s| s.as_str()),
         a.prompt_text.as_deref(),
-        None,
+        a.spk_emb_path.first().map(|s| s.as_str()),
         a.use_spk_emb,
         a.use_zero_spk_emb,
         a.cfg,
@@ -1246,11 +1239,20 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
     println!("  model loaded in {:?}", t0.elapsed());
 
     // ---- voice conditioning (same rules as synth.rs) ----------------------
-    let mut spk_row: Option<Vec<f32>> = None;
+    let mut spk_rows: Vec<Vec<f32>> = Vec::new();
     let mut prompt_latent: Option<(Vec<f32>, usize)> = None;
     let mut prompt_text = req.prompt_text.clone();
     if a.use_zero_spk_emb {
-        spk_row = Some(vec![0.0f32; HIDDEN]);
+        spk_rows.push(vec![0.0f32; HIDDEN]);
+    }
+    if a.use_spk_emb && !a.use_zero_spk_emb && !a.spk_emb_path.is_empty() {
+        for path in &a.spk_emb_path {
+            let v = crate::pt::load_tensor(std::path::Path::new(path))?;
+            if v.len() != 192 {
+                bail!("{path} holds a {}-dim embedding, expected 192", v.len());
+            }
+            spk_rows.push(pl.project_speaker(&v));
+        }
     }
     if !a.prompt_wav_path.is_empty() {
         let mut at_44k: Vec<f32> = Vec::new();
@@ -1270,10 +1272,10 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
                 x
             });
         }
-        if a.use_spk_emb && spk_row.is_none() {
+        if a.use_spk_emb && spk_rows.is_empty() {
             let onnx = model_dir.join("campplus.onnx");
             let emb = crate::spk::embed_16k_with(&onnx, &for_spk)?;
-            spk_row = Some(pl.project_speaker(&emb));
+            spk_rows.push(pl.project_speaker(&emb));
         }
         if req.prompt_text.is_some() {
             prompt_latent = Some(pl.encode_prompt_latent(&mut *rng, &at_44k)?);
@@ -1295,15 +1297,15 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
             &crate::tok::InputSeqArgs {
                 prompt: &req.prompt,
                 text: fragment,
-                num_speakers: spk_row.is_some() as usize,
+                num_speakers: spk_rows.len(),
                 instruction: req.instruction.as_deref(),
                 prompt_text: if latent_rows.is_some() { prompt_text.as_deref() } else { None },
                 prompt_latent_steps: latent_steps,
             },
         )?;
         let mut embeds = pl.embed_ids(&layout.input_ids)?;
-        if let Some(se) = &spk_row {
-            let pos = layout.speaker_positions[0];
+        for (slot, se) in spk_rows.iter().enumerate() {
+            let pos = layout.speaker_positions[slot];
             embeds[pos * HIDDEN..(pos + 1) * HIDDEN].copy_from_slice(&se[..]);
         }
         if let Some(rows) = &latent_rows {
@@ -1344,7 +1346,7 @@ pub fn run(a: &crate::synth::Args, model_dir: &std::path::Path) -> Result<()> {
             let spk16 = crate::audio::resample(&wav, 44100, 16000);
             let onnx = model_dir.join("campplus.onnx");
             let se = crate::spk::embed_16k_with(&onnx, &spk16)?;
-            spk_row = Some(pl.project_speaker(&se));
+            spk_rows = vec![pl.project_speaker(&se)];
             let (lat, np) = pl.encode_prompt_latent(&mut *rng, &wav)?;
             latent_rows = Some(pl.project_latent_rows(&lat, np));
             latent_steps = np;

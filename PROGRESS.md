@@ -384,7 +384,7 @@ args=+） | ✅ | ✅ | ✅ |
 | STYLE 多片首片重条件 | ✅ | ✅ | ✅ |
 | cfg / sigma / temperature / max_decode_steps / no_trim_silence / seed | ✅ | ✅ | ✅ |
 | 文本规范化（pynini FST） | ✅（本机缺 pynini 跑不了） | ✅ FST 链已移植，缺 TalkerRE 规则层 | ✅ 同左（共用 prepare_text） |
-| --spk_emb_path（.pt） | ✅ | ❌ 明确报错 | ❌ 同一条报错 |
+| --spk_emb_path（.pt） | ✅ | ✅ 见 0.13 | ✅ 同左 |
 | 流式推理 | 库里有，infer.py 未暴露 | ❌ | ❌ |
 
 最后三项是**移植版共同的缺口**，不是 CPU 独有的；其余在 CPU 上今日实测：A1 1.0000/1.79e-4/1.000000、
@@ -444,6 +444,23 @@ ormalize_text_kit；--no_text_normalization 行为不变。
 再进 TalkerTN，`prepare_text` 与两条推理路径都走它。完整金标 `goldens/tn_cases.json`：
 **97/97 一致**（67 中文 + 30 英文，含 URL/Markdown/引号/emoji 清理、`-5.5°C`、
 `gpt-3.5-turbo`、`1,234,567`、`£-150`、`1st/2nd/3rd`）。
+
+### 0.13 `--spk_emb_path`（预计算说话人向量，2026-11-03）
+
+参考的 `--spk_emb_path` 接受 `torch.save` 写出的 `.pt`，里面是 **192 维 CAMPlus 说话人
+向量**（可直接指定音色，不需要 prompt wav），多个文件对应多个 speaker 槽位。
+`ming_tts._speaker_embeddings` 的规则：文件可以是裸 tensor，也可以是
+`{"spk_emb"/"speaker_embedding"/"embedding"/"emb": tensor}` 的 dict，最后一维必须是 192；
+`use_zero_spk_emb` 优先于它。
+
+- `src/pt.rs`：无 torch 依赖的读取器。torch 的 ZIP 容器（stored entry）+ 子集 unpickler
+  （PROTO/GLOBAL/MARK/TUPLE/BININT/BINUNICODE/BINPERSID/BINPUT/BUILD/REDUCE…），还原
+  `_rebuild_tensor_v2` 的 storage/size/stride/offset，支持 Float/Double/Half storage；
+  压缩条目、legacy 格式、非 tensor 负载都会给出明确错误。
+- 两条后端都支持多文件：`num_speakers = 文件数`，逐槽写入 `speaker_positions[i]`
+  （GPU 与 CPU 各一套）。
+- 实测：与 CAMPlus 路径同一向量对比，**只有 speaker 行不同，相对误差 2.0e-6**（Rust 与
+  Python CAMPlus 的数值差），其余行完全一致；双文件（2 槽）与 dict 格式文件都跑通。
 
 ## 1. 现状
 
@@ -826,7 +843,7 @@ cuBLAS 归约 + CUDA 超越函数——4.6 已经用测量证明不可达。**�
 
 ### P2：功能缺口（原版有、这个移植没做）
 
-- `--spk_emb_path`（.pt 文件）未实现：需要 torch 序列化格式，目前显式报错。
+- `--spk_emb_path`（.pt 文件）已实现（见 0.13）。
 - pynini 文本规范化未移植：`--no_text_normalization` 关闭时的数字/符号规范化缺失。
   非中文语言走"绕过 TN"分支，所以 F 组不受影响。
 - 多分片路径（`max_length` 切出 >1 个 fragment）已补验收（4.7 的 S4/S5：2 片、6 片、21.6 s，rel 1.3e-2）。

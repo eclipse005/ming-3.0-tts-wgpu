@@ -15,6 +15,7 @@ mod gpu;
 mod istft;
 mod nn;
 mod ops;
+mod pt;
 #[cfg(test)]
 mod parity;
 #[cfg(test)]
