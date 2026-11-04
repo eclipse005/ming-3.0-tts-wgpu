@@ -11,17 +11,20 @@ box with no working Python/CUDA environment.
 import os
 import sys
 import tempfile
+from pathlib import Path
 
-sys.path.insert(0, "D:/Ming-3.0-tts/wgpu/tools")
-sys.path.insert(0, "D:/Ming-3.0-tts")
+HERE = Path(__file__).resolve().parents[1]
+REF_REPO = os.environ.get("MING_REF", "D:/Ming-3.0-tts")
+sys.path.insert(0, str(HERE / "tools"))
+sys.path.insert(0, REF_REPO)
 import numpy as np
 import soundfile as sf
 import subprocess
 
 from check_params_align import SPEC, cli_args, compare
 
-GOLD = "D:/Ming-3.0-tts/wgpu/goldens/m5_params"
-OUT = "D:/Ming-3.0-tts/output/rust_params"
+GOLD = str(HERE / "goldens" / "m5_params")
+OUT = REF_REPO + "/output/rust_params"
 
 
 def main():
@@ -41,7 +44,7 @@ def main():
         env["MING_NOISE_GOLDEN"] = gdir
         p = subprocess.run(cli_args(name, task, text, kwargs),
                            capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", env=env, cwd="D:/Ming-3.0-tts")
+                           errors="replace", env=env, cwd=REF_REPO)
         if p.returncode != 0:
             tail = (p.stderr or p.stdout).strip().splitlines()[-3:]
             print(f"{name:22s} FAILED {tail}", flush=True)

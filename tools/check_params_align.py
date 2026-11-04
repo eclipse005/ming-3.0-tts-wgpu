@@ -8,12 +8,15 @@ import sys
 import numpy as np
 import soundfile as sf
 
-REPO = "D:/Ming-3.0-tts"
-EXE = REPO + "/wgpu/target/release/ming-tts-wgpu.exe"
-MODEL = REPO + "/Ming-3.0-tts-0.5b"
-REF = REPO + "/output/params_test"
-OUT = REPO + "/output/rust_params"
-PROMPT_WAV = "data/voice_presets/voice_audio/lingguang.wav"
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parents[1]                  # this port's repo root
+REF_REPO = os.environ.get("MING_REF", "D:/Ming-3.0-tts")    # the Python reference
+EXE = os.environ.get("MING_EXE", str(HERE / "target" / "release" / "ming-tts-wgpu.exe"))
+MODEL = os.environ.get("MING_MODEL", REF_REPO + "/Ming-3.0-tts-0.5b")
+REF = REF_REPO + "/output/params_test"
+OUT = REF_REPO + "/output/rust_params"
+PROMPT_WAV = REF_REPO + "/data/voice_presets/voice_audio/lingguang.wav"
 PROMPT_TEXT = "诶，你今天有空吗？我们能不能聊聊这件事啊？"
 CLONE = dict(prompt_wav_path=PROMPT_WAV, prompt_text=PROMPT_TEXT, use_spk_emb=True)
 
@@ -135,7 +138,7 @@ def speaker_emb(path):
     import torchaudio
     import onnxruntime as ort
     if _SESS is None:
-        _SESS = ort.InferenceSession(REPO + "/Ming-3.0-tts-0.5b/campplus.onnx",
+        _SESS = ort.InferenceSession(MODEL + "/campplus.onnx",
                                      providers=["CPUExecutionProvider"])
     x, sr = sf.read(path, dtype="float32")
     if x.ndim > 1:

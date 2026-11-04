@@ -4,11 +4,14 @@
 # encodes the prompt every time. Re-render those cases with cache_prompts=False
 # so the comparison is like-for-like.
 import sys
-sys.path.insert(0, "D:/Ming-3.0-tts")
+HERE = Path(__file__).resolve().parents[1]
+REF_REPO = os.environ.get("MING_REF", "D:/Ming-3.0-tts")
+sys.path.insert(0, REF_REPO)
+os.chdir(REF_REPO)
 import numpy as np, torch, os
 from ming_tts import MingTTS
 
-OUT = "D:/Ming-3.0-tts/output/ref_nocache"
+OUT = REF_REPO + "/output/ref_nocache"
 PROMPT_WAV = "data/voice_presets/voice_audio/lingguang.wav"
 PROMPT_TEXT = "诶，你今天有空吗？我们能不能聊聊这件事啊？"
 CLONE = dict(prompt_wav_path=PROMPT_WAV, prompt_text=PROMPT_TEXT, use_spk_emb=True)
@@ -25,7 +28,7 @@ CASES = [
 ]
 
 os.makedirs(OUT, exist_ok=True)
-model = MingTTS("Ming-3.0-tts-0.5b", device="cuda:0", text_normalization=False,
+model = MingTTS(REF_REPO + "/Ming-3.0-tts-0.5b", device="cuda:0", text_normalization=False,
                 cache_prompts=False)
 for name, task, text, kwargs in CASES:
     torch.manual_seed(1895)

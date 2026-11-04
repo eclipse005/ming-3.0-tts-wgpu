@@ -3,9 +3,12 @@
 # KV ceiling), very short text, digits/symbols with the FST normaliser on,
 # long English, mixed script, and --raw_text.
 import gc, json, os, subprocess, sys
+from pathlib import Path
 
-sys.path.insert(0, "D:/Ming-3.0-tts")
-sys.path.insert(0, "D:/Ming-3.0-tts/wgpu/tools")
+HERE = Path(__file__).resolve().parents[1]
+REF_REPO = os.environ.get("MING_REF", "D:/Ming-3.0-tts")
+sys.path.insert(0, REF_REPO)
+sys.path.insert(0, str(HERE / "tools"))
 
 import numpy as np
 import soundfile as sf
@@ -14,10 +17,9 @@ import torch
 from check_params_align import compare, logmel
 from ming_tts import MingTTS
 
-REPO = "D:/Ming-3.0-tts"
-EXE = REPO + "/wgpu/target/release/ming-tts-wgpu.exe"
-MODEL = REPO + "/Ming-3.0-tts-0.5b"
-OUT = REPO + "/output/stress"
+EXE = os.environ.get("MING_EXE", str(HERE / "target" / "release" / "ming-tts-wgpu.exe"))
+MODEL = os.environ.get("MING_MODEL", REF_REPO + "/Ming-3.0-tts-0.5b")
+OUT = REF_REPO + "/output/stress"
 REF = OUT + "/ref"
 RUST = OUT + "/rust"
 
