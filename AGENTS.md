@@ -42,10 +42,10 @@ target\release\ming-tts-wgpu.exe synth ^
    搞错任何一个，parity 会以 1e-1 量级失败。
 5. **Python 主仓 `D:\Ming-3.0-tts` 是只读参考**，不要改它。
 6. **单次改动后必须跑 `cargo test --release`**；碰到音频相关的改动再跑
-   `python tools/check_params_align.py`（需要 videolingo 的 conda 环境；
-   `MING_ALIGN_DEVICE=cpu` 可对拍 CPU 后端）。CPU 与 GPU 都要保持能跑：分片编排已经
-   共用 `src/backend.rs`（0.15），但两个 decode 环仍是各自实现，改条件（CFM history、
-   seed、停止判据）必须两边一起改 —— 0.14/0.15 各修过一次漂移。
+   `python wgpu/tools/check_params_align.py`（在 `D:\Ming-3.0-tts` 下执行，见文末的验收
+   脚本说明）。CPU 与 GPU 都要保持能跑：分片编排已经共用 `src/backend.rs`（0.15），但两个
+   decode 环仍是各自实现，改条件（CFM history、seed、停止判据）必须两边一起改 ——
+   0.14/0.15 各修过一次漂移。
 
 ## 怎么判断"改对了"
 
@@ -75,19 +75,29 @@ target\release\ming-tts-wgpu.exe synth ^
   `src/shaders/` 按 kernel 家族分模块（gemv / gemv_t1 / gemv_t6 / prefill / attention /
   elementwise），模型侧仍然只写 `shaders::NAME`。
 
-## 已知可继续的清理（非功能缺口）
+## 待查与性能决策
 
-代码层面目前没有已知项。下一项是**性能**决策而不是清理：t=6 的 32-lane warp-per-row
-kernel 在独显上端到端快 10.7%（核显上慢 46%），但它换掉了 t=6 的归约顺序 —— 用金标 36 例
-实测，C6_surprised 的 log-mel 从 0.99647 掉到 0.99405，跌破 4.2 节给"后段相位差"用例
-定的 0.9959，所以没有采纳。要吃这 10% 得连同 36 例 + 压力集重新验收（改
-`ops.rs::Ops::new` 里的 `k_linear_t6` 一行 + `t6_plan` 的 `per_wg`）—— 见 PROGRESS 0.16。
+代码层面没有已知的清理项。有两件事**待查**：
+
+1. **F2_korean 时长差 1 步**：现跑参考是 1.0333，4.2 表里是 1.0000。d7dca7b 与更早的
+   ffbf48d 都复现 1.0333，说明是 10-31 之后那批 kernel 改动之一带来的（参考环境一直跑不通，
+   没人复验过）。换 t=6 的 warp kernel 能回到 1.0000，但那只是把差异挪到别处。
+2. **A4_clone_latent_only 在 P104 上稳定掉设备**（`Buffer with 'readback' label is
+   invalid`），核显正常。I1–I4 走同一条克隆路径却没事，差别只在 `use_spk_emb` 分支。
+
+性能决策（已复核，结论是不做）：t=6 的 32-lane warp-per-row kernel 在独显上端到端快
+9.5%（核显上慢 46%）。现跑参考 36 例里它让 30 例时长全 1.0000、还把 F2 的 1 步时长差修好，
+代价是 H1_whisper_secret 的 log-mel 0.99587 → 0.96889，C6/B2/C1 各降一点。按"不为提速
+改轨迹"的规矩不收。真要改就是 `ops.rs::Ops::new` 的 `k_linear_t6` 一行 + `t6_plan` 的
+`per_wg`，验收清单见 PROGRESS 0.17。
 
 回退口 / 调试开关：`MING_PREFILL=base`（强制 12-token 窗口 kernel）、`MING_SCRATCH=0`、
 `MING_LM_FAST=0`、`MING_BIND_CACHE=0`；`MING_PROFILE=1` 分段耗时、
 `MING_LM_PREFILL_PROFILE=1` prefill 单层、`MING_MEM=1` 显存、
 `MING_DUMP_WGSL=<dir>` 把编译进去的 WGSL 按内容哈希落盘（核对 shader 重构用）。
 
-验收脚本：`tools/check_params_align.py` 现跑 Python 参考；`tools/_goldens_align.py`
-回放金标里的 `noise_*.npy` 对比 `ref_waveform.npy`，不需要 torch/CUDA 环境，36 例音频门限
-用它（已知 7 例金标本身无法回放，见 PROGRESS 0.16）。
+验收脚本：`tools/check_params_align.py` 比对 `output/params_test/*.wav`（4.2 表那套参考，
+**不需要 torch，只要 numpy + soundfile**；但必须在 `D:\Ming-3.0-tts` 下运行，克隆用例的
+prompt wav 是相对路径）。`tools/_goldens_align.py` 回放金标里的 `noise_*.npy` 对比
+`ref_waveform.npy`，不需要 Python 参考，但它的绝对值带系统偏移（金标里波形与抽样不同源），
+**只能做 A/B，不能对门限**；门限级结论一律用前者。
