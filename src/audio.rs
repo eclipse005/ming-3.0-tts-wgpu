@@ -310,8 +310,10 @@ mod tests {
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         assert_eq!(bytes.len() % 4, 0, "{} is not f32 payload", path.display());
         bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect()
     }
 
@@ -333,6 +335,7 @@ mod tests {
 
     #[test]
     fn read_wav_matches_torchaudio_load_lingguang() {
+        crate::need_goldens!();
         let (samples, rate) = read_wav(&repo_file("data/voice_presets/voice_audio/lingguang.wav"))
             .expect("read lingguang.wav");
         let want = read_f32("lingguang_mono.f32");
@@ -351,6 +354,7 @@ mod tests {
 
     #[test]
     fn read_wav_matches_torchaudio_load_db30() {
+        crate::need_goldens!();
         let (samples, rate) = read_wav(&repo_file("data/voice_presets/voice_audio/db30.wav"))
             .expect("read db30.wav");
         let want = read_f32("db30_mono.f32");
@@ -367,6 +371,7 @@ mod tests {
 
     #[test]
     fn read_wav_averages_channels_like_mean_dim0() {
+        crate::need_goldens!();
         let path = goldens_dir().join("stereo_input.wav");
         let (samples, rate) = read_wav(&path.to_string_lossy()).expect("read stereo_input.wav");
         let want = read_f32("stereo_mean.f32");
@@ -382,6 +387,7 @@ mod tests {
 
     #[test]
     fn resample_lingguang_to_16000() {
+        crate::need_goldens!();
         let input = read_f32("lingguang_mono.f32");
         let want = read_f32("lingguang_48000_to_16000.f32");
         let got = resample(&input, 48000, 16000);
@@ -398,6 +404,7 @@ mod tests {
 
     #[test]
     fn resample_lingguang_to_44100() {
+        crate::need_goldens!();
         let input = read_f32("lingguang_mono.f32");
         let want = read_f32("lingguang_48000_to_44100.f32");
         let got = resample(&input, 48000, 44100);
@@ -414,6 +421,7 @@ mod tests {
 
     #[test]
     fn resample_db30_to_44100() {
+        crate::need_goldens!();
         let input = read_f32("db30_mono.f32");
         let want = read_f32("db30_16000_to_44100.f32");
         let got = resample(&input, 16000, 44100);
@@ -430,6 +438,7 @@ mod tests {
 
     #[test]
     fn resample_chirp_down() {
+        crate::need_goldens!();
         let input = read_f32("chirp_44100.f32");
         let want = read_f32("chirp_44100_to_16000.f32");
         let got = resample(&input, 44100, 16000);
@@ -446,6 +455,7 @@ mod tests {
 
     #[test]
     fn resample_sine_up() {
+        crate::need_goldens!();
         let input = read_f32("sine_22050.f32");
         let want = read_f32("sine_22050_to_44100.f32");
         let got = resample(&input, 22050, 44100);
@@ -462,6 +472,7 @@ mod tests {
 
     #[test]
     fn resample_identity_and_empty() {
+        crate::need_goldens!();
         let input = read_f32("sine_22050.f32");
         let want = read_f32("sine_22050_to_22050.f32");
         let got = resample(&input, 22050, 22050);
@@ -555,6 +566,7 @@ mod tests {
 
     #[test]
     fn write_wav_matches_torchaudio_save_bytes() {
+        crate::need_goldens!();
         let cases = [
             "wav_ref_1ch_44100",
             "wav_ref_2ch_16000",
@@ -578,6 +590,7 @@ mod tests {
     /// read it, write it back, and the bytes match except the PEAK timestamp.
     #[test]
     fn roundtrip_pipeline_output_wav() {
+        crate::need_goldens!();
         let path = repo_file("output/params_test/A1_bare.wav");
         if !std::path::Path::new(&path).is_file() {
             println!("skipping: {path} not present");
@@ -614,6 +627,7 @@ mod tests {
 
     #[test]
     fn roundtrip_lingguang_wav_is_byte_identical() {
+        crate::need_goldens!();
         let reference = goldens_dir().join("wav_ref_lingguang_48000.wav");
         let want = std::fs::read(&reference).expect("read reference wav");
         let path = repo_file("data/voice_presets/voice_audio/lingguang.wav");

@@ -68,6 +68,10 @@ type FlowTrace<'a> = Option<(
     &'a mut Vec<Vec<f32>>,
 )>;
 
+/// The six stage tensors `dit_forward_bisect` returns, in pipeline order.
+#[cfg(test)]
+type DitStages = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
+
 pub struct DitEngine {
     gpu: Gpu,
     // timestep embedder
@@ -513,7 +517,7 @@ impl DitEngine {
         t: f32,
         c: &[f32],
         lh: &[f32],
-    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
+    ) -> Result<DitStages> {
         let mut temb = vec![0f32; 256];
         for j in 0..128 {
             let e = ((j as f32) * -(10000f32.ln()) / 127.0).exp();
@@ -555,7 +559,7 @@ impl DitEngine {
         noise: &[f32],
         sde: &[f32],
         cfg: f32,
-        trace: Option<(&mut Vec<Vec<f32>>, &mut Vec<Vec<f32>>, &mut Vec<Vec<f32>>)>,
+        trace: FlowTrace<'_>,
     ) -> Result<Vec<f32>> {
         self.flow_sample_full(z, lh, noise, sde, cfg, 0.25, 0.0, trace)
     }

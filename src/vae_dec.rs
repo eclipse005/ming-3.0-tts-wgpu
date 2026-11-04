@@ -179,14 +179,12 @@ impl VaeDecoder {
     }
 
     #[cfg(test)]
-
     pub fn upsample_check(&self, latent: &[f32], t_lat: usize) -> Result<Vec<f32>> {
         let e = self.fc1_out(latent, t_lat)?;
         Ok(linear_upsample(&e, t_lat, HIDDEN, UPSAMPLE))
     }
 
     #[cfg(test)]
-
     pub fn stack_check(&self, up: &[f32], t: usize) -> Result<Vec<f32>> {
         let x = self.gpu.upload_f32(up, "dec.up2");
         let h = self.stack(&self.dec, x, t)?;
@@ -195,7 +193,6 @@ impl VaeDecoder {
     }
 
     #[cfg(test)]
-
     pub fn head_check(&self, up: &[f32], t: usize) -> Result<Vec<f32>> {
         let x = self.gpu.upload_f32(up, "dec.up3");
         let h = self.stack(&self.dec, x, t)?;

@@ -75,7 +75,6 @@ pub const DENSE: Dialect = Dialect {
 };
 
 #[cfg(test)]
-
 pub fn dialect(model_type: &str) -> Result<Dialect> {
     if model_type == "dense" {
         Ok(DENSE)
@@ -138,7 +137,6 @@ impl Tok {
     }
 
     #[cfg(test)]
-
     pub fn vocab_size(&self) -> usize {
         self.tokenizer.get_vocab_size(true)
     }
@@ -392,6 +390,7 @@ mod tests {
 
     #[test]
     fn contract_token_ids_match_prompt_contract() {
+        crate::need_goldens!();
         let (tok, ids) = loaded();
         for (token, want) in DENSE_TOKEN_IDS {
             let got = tok.token_id(token).expect("token in vocab");
@@ -440,6 +439,7 @@ mod tests {
 
     #[test]
     fn encode_matches_python_for_params_test_corpus() {
+        crate::need_goldens!();
         let (tok, ids) = loaded();
         let mut total = 0usize;
         for entry in &ids.corpus {
@@ -459,6 +459,7 @@ mod tests {
 
     #[test]
     fn build_input_ids_matches_python_layout() {
+        crate::need_goldens!();
         let (tok, ids) = loaded();
         let mut checked = 0usize;
         let mut tokens = 0usize;

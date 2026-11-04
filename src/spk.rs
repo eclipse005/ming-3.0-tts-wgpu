@@ -416,8 +416,10 @@ mod tests {
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect()
     }
 
@@ -444,6 +446,7 @@ mod tests {
 
     #[test]
     fn povey_window_matches_torchaudio() {
+        crate::need_goldens!();
         let want = read_f32("spk_window_povey.f32");
         let got = povey_window(400);
         let diff = max_abs_diff(&got, &want);
@@ -456,6 +459,7 @@ mod tests {
 
     #[test]
     fn fft_input_matches_torchaudio() {
+        crate::need_goldens!();
         let wav = lingguang_16k();
         assert_eq!(wav.len(), 52691, "16 kHz prompt length");
         let (got, frames) = fft_input(&wav);
@@ -472,6 +476,7 @@ mod tests {
 
     #[test]
     fn power_spectrum_matches_torchaudio() {
+        crate::need_goldens!();
         let wav = lingguang_16k();
         let (frames, n_frames) = fft_input(&wav);
         let got = power_spectrum(&frames, n_frames);
@@ -488,6 +493,7 @@ mod tests {
 
     #[test]
     fn mel_filterbank_matches_torchaudio() {
+        crate::need_goldens!();
         let got = mel_filterbank();
         let want = read_f32("spk_mel_padded.f32");
         assert_eq!(got.len(), want.len(), "mel matrix length");
@@ -505,6 +511,7 @@ mod tests {
 
     #[test]
     fn log_mel_energies_match_torchaudio() {
+        crate::need_goldens!();
         let wav = lingguang_16k();
         let (frames, n_frames) = fft_input(&wav);
         let spectrum = power_spectrum(&frames, n_frames);
@@ -521,6 +528,7 @@ mod tests {
 
     #[test]
     fn campplus_features_match_torchaudio() {
+        crate::need_goldens!();
         let wav = lingguang_16k();
         let got = campplus_features(&wav);
         let want = read_f32("spk_lingguang_fbank.f32");
@@ -536,6 +544,7 @@ mod tests {
 
     #[test]
     fn speaker_embedding_matches_python() {
+        crate::need_goldens!();
         let path = goldens_dir().join("spk_lingguang.json");
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));

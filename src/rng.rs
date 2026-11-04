@@ -81,6 +81,7 @@ mod tests {
     /// The recorded torch.randn stream from a real reference run.
     #[test]
     fn matches_torch_randn() {
+        crate::need_goldens!();
         let dir = std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
         let dir = std::path::Path::new(&dir).join("m5");

@@ -458,6 +458,7 @@ mod tests {
     /// Every sampled value against inflect 7.6.0 (tools/_en_goldens.py).
     #[test]
     fn words_match_inflect_goldens() {
+        crate::need_goldens!();
         let v = golden("number_en_words.json");
         let mut bad = 0;
         for row in v["words"].as_array().unwrap() {
@@ -489,6 +490,7 @@ mod tests {
 
     #[test]
     fn normalize_numbers_matches_reference() {
+        crate::need_goldens!();
         let v = golden("number_en_cases.json");
         let eng = NumberEn::new().unwrap();
         let mut bad = 0;

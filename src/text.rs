@@ -1575,6 +1575,7 @@ mod tests {
 
     #[test]
     fn corpus_matches_python() {
+        crate::need_goldens!();
         let golden = load("text.json");
         let corpus = golden["corpus"].as_array().unwrap();
         let fuzz = golden["fuzz"].as_array().unwrap();
@@ -1667,7 +1668,7 @@ mod tests {
             check_vec!("pipe_fragments_40", cut_text_by_semantic_length(&pipe, 40));
 
             cases += 1;
-            if cases % 50 == 0 {
+            if cases.is_multiple_of(50) {
                 println!("text corpus: {cases} entries compared");
             }
         }
@@ -1680,6 +1681,7 @@ mod tests {
 
     #[test]
     fn split_long_fragment_matches_python() {
+        crate::need_goldens!();
         let golden = load("text.json");
         let fixed = golden["split_long_fragment"].as_array().unwrap();
         let fuzz = golden["fuzz_split_long_fragment"].as_array().unwrap();
@@ -1703,6 +1705,7 @@ mod tests {
 
     #[test]
     fn append_text_fragment_matches_python() {
+        crate::need_goldens!();
         let golden = load("text.json");
         let fixed = golden["append_text_fragment"].as_array().unwrap();
         let fuzz = golden["fuzz_append_text_fragment"].as_array().unwrap();
@@ -1726,6 +1729,7 @@ mod tests {
 
     #[test]
     fn character_classes_match_python() {
+        crate::need_goldens!();
         let golden = load("text.json");
         let classes = &golden["char_classes"];
 

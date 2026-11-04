@@ -38,6 +38,7 @@ mod tests {
 
     #[test]
     fn rmsnorm_layer4_matches_python() {
+        crate::need_goldens!();
         let h3 = golden("h3_hidden.npy").unwrap();
         let w = golden("layer4_norm_w.npy").unwrap();
         let out = golden("layer4_norm_out.npy").unwrap();
@@ -77,8 +78,7 @@ mod tests {
         let big_w = crate::weights::TensorEntry {
             shape: vec![896, 896],
             dtype: crate::weights::DType::Bf16,
-            data: std::iter::repeat([0x80u8, 0x3Fu8]) // bf16 1.0
-                .take(896 * 896)
+            data: std::iter::repeat_n([0x80u8, 0x3Fu8], 896 * 896) // bf16 1.0
                 .flatten()
                 .collect(),
         };
@@ -119,6 +119,7 @@ mod tests {
 
     #[test]
     fn q_proj_gemv_bf16w_matches_python() {
+        crate::need_goldens!();
         let q_in = golden("layer4_norm_out.npy").unwrap();
         let q_out = golden("layer4_q_out.npy").unwrap();
         let q_w = golden("layer4_q_w.npy").unwrap();
@@ -164,6 +165,7 @@ mod m1_tests {
 
     #[test]
     fn llm_replay_matches_python() {
+        crate::need_goldens!();
         let pre = golden("m1_prefill_embeds.npy").unwrap();
         let step_in = golden("m1_step_inputs.npy").unwrap();
         let step_z = golden("m1_step_z.npy").unwrap();
@@ -224,6 +226,7 @@ mod cpu_tests {
 
     #[test]
     fn cpu_llm_replay_matches_python() {
+        crate::need_goldens!();
         let pre = golden("m1_prefill_embeds.npy").unwrap();
         let step_in = golden("m1_step_inputs.npy").unwrap();
         let step_z = golden("m1_step_z.npy").unwrap();
@@ -277,6 +280,7 @@ mod cpu_dit_forward_tests {
 
     #[test]
     fn cpu_pair_forward_matches_gpu() {
+        crate::need_goldens!();
         let dir = |n| std::path::Path::new(&std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
             .join(n);
@@ -319,6 +323,7 @@ mod cpu_vae_enc_tests {
 
     #[test]
     fn cpu_vae_encoder_matches_python() {
+        crate::need_goldens!();
         let wf = golden("m3_waveform.npy").unwrap();
         let mean = golden("m3_mean.npy").unwrap();
         let std = golden("m3_std.npy").unwrap();
@@ -357,6 +362,7 @@ mod cpu_vae_tests {
 
     #[test]
     fn cpu_vae_decode_matches_python() {
+        crate::need_goldens!();
         let latent = golden("m4_latent.npy").unwrap();
         let fc1 = golden("m4_fc1_out.npy").unwrap();
         let up = golden("m4_up_out.npy").unwrap();
@@ -385,6 +391,7 @@ mod cpu_dit_tests {
 
     #[test]
     fn cpu_flowloss_matches_python() {
+        crate::need_goldens!();
         let dir = |n| std::path::Path::new(&std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
             .join(n);
@@ -435,6 +442,7 @@ mod m2_tests {
 
     #[test]
     fn flowloss_matches_python() {
+        crate::need_goldens!();
         let dir = |n| std::path::Path::new(&std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
             .join(n);
@@ -495,6 +503,7 @@ mod m2_bisect_tests {
 
     #[test]
     fn dit_forward_bisect() {
+        crate::need_goldens!();
         let g = |n| read_npy(&std::path::Path::new(&std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
             .join(n)).unwrap();
@@ -531,6 +540,7 @@ mod m2_trace_tests {
 
     #[test]
     fn euler_trajectory_matches_python() {
+        crate::need_goldens!();
         let g = |n| read_npy(&std::path::Path::new(&std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
             .join(n)).unwrap();
@@ -581,6 +591,7 @@ mod m2_cross_tests {
 
     #[test]
     fn dit_forward_cross_check() {
+        crate::need_goldens!();
         let g = |n| read_npy(&std::path::Path::new(&std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
             .join(n)).unwrap();
@@ -609,6 +620,7 @@ mod m3_tests {
 
     #[test]
     fn vae_encoder_matches_python() {
+        crate::need_goldens!();
         let wf = golden("m3_waveform.npy").unwrap();
         let mean = golden("m3_mean.npy").unwrap();
         let std = golden("m3_std.npy").unwrap();
@@ -654,6 +666,7 @@ mod m3_bisect_tests {
 
     #[test]
     fn vae_encoder_bisect() {
+        crate::need_goldens!();
         let g = |n| read_npy(&std::path::Path::new(&std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
             .join(n)).unwrap();
@@ -718,6 +731,7 @@ mod m3_layer0_tests {
 
     #[test]
     fn vae_layer0_parts() {
+        crate::need_goldens!();
         let g = |n| read_npy(&std::path::Path::new(&std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string()))
             .join(n)).unwrap();
@@ -781,6 +795,7 @@ mod m3_rope_tests {
 
     #[test]
     fn vae_rope_matches_numpy() {
+        crate::need_goldens!();
         let dir = std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
         let q = read_npy(&std::path::Path::new(&dir).join("m3_l0_q_proj.npy")).unwrap();
@@ -834,6 +849,7 @@ mod kv_write_tests {
     #[test]
     #[allow(clippy::erasing_op, clippy::identity_op)] // the indices spell out [kv, pos, channel]
     fn kv_write_micro() {
+        crate::need_goldens!();
         let gpu = Gpu::new().unwrap();
         let k = kernel(&gpu, shaders::KV_WRITE, 1);
         // 3 tokens x 128 values, row t filled with value (t+1)
@@ -871,6 +887,7 @@ mod m3_fc3_tests {
 
     #[test]
     fn fc3_path_bisect() {
+        crate::need_goldens!();
         let dir = std::env::var("MING_GOLDEN")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
         let wf = read_npy(&std::path::Path::new(&dir).join("m3_waveform.npy")).unwrap();
@@ -880,7 +897,7 @@ mod m3_fc3_tests {
         let _ = enc.encode_params(&wf.data).unwrap();
         for (name, got) in enc.take_bisect() {
             let want_npy = read_npy(&std::path::Path::new(&dir)
-                .join(&format!("m3_{name}.npy"))).unwrap();
+                .join(format!("m3_{name}.npy"))).unwrap();
             let e = rel_l2(&got, &want_npy.data);
             println!("{name}: rel_l2={e:.3e} got[:3]={:?} want[:3]={:?}",
                      &got[0..3], &want_npy.data[0..3]);
@@ -898,6 +915,7 @@ mod m4_tests {
 
     #[test]
     fn vae_decoder_matches_python() {
+        crate::need_goldens!();
         let latent = golden("m4_latent.npy").unwrap();
         let fc1 = golden("m4_fc1_out.npy").unwrap();
         let up = golden("m4_up_out.npy").unwrap();
@@ -954,6 +972,7 @@ mod m5_tests {
 
     #[test]
     fn decode_loop_matches_python() {
+        crate::need_goldens!();
         let d = m5dir();
         let load = |n: &str| read_npy(&d.join(n)).unwrap();
         let expects: usize = 43;
@@ -1055,6 +1074,7 @@ mod microbench2 {
 
     #[test]
     fn device_path_vs_sync() {
+        crate::need_goldens!();
         let gpu = Gpu::new().unwrap();
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let dit = crate::dit::DitEngine::load(gpu.clone(), ops_for(&gpu), &weights).unwrap();
@@ -1114,10 +1134,11 @@ mod m5_clone_tests {
     /// reference's eps draw, and the spk_head projection.
     #[test]
     fn clone_conditioning_matches_python() {
+        crate::need_goldens!();
         let wav_path = std::path::Path::new("D:/Ming-3.0-tts/data/voice_presets/voice_audio/lingguang.wav");
         let (x, rate) = audio::read_wav(wav_path.to_str().unwrap()).unwrap();
         let mut wav = if rate != 44100 { audio::resample(&x, rate, 44100) } else { x };
-        let align = 882 * 4 * 1;
+        let align = 882 * 4;
         let rem = wav.len() % align;
         if rem != 0 {
             let mut padded = vec![0f32; wav.len() + align - rem];
@@ -1182,6 +1203,7 @@ mod m5_seq_tests {
     /// 42 prompt-latent rows, against what the reference built.
     #[test]
     fn clone_input_sequence_matches_python() {
+        crate::need_goldens!();
         let want_ids = case("a3_input_ids.npy");
         let want_emb = case("a3_inputs_embeds.npy");
         let latent = case("prompt_latent.npy");
@@ -1260,6 +1282,7 @@ mod m5_spk_tests {
     /// campplus(16k) -> spk_head(896): the row the clone case splices in.
     #[test]
     fn speaker_row_matches_python() {
+        crate::need_goldens!();
         let path = "D:/Ming-3.0-tts/data/voice_presets/voice_audio/lingguang.wav";
         let (x, rate) = audio::read_wav(path).unwrap();
         let spk16 = if rate != 16000 { audio::resample(&x, rate, 16000) } else { x };
@@ -1298,6 +1321,7 @@ mod m5_a3_tests {
 
     #[test]
     fn clone_loop_step_by_step() {
+        crate::need_goldens!();
         let emb = g("a3_embeds.npy");
         let z_ref = g("a3_z_steps.npy");
         let lat_ref = g("a3_latents.npy");
@@ -1366,6 +1390,7 @@ mod m5_chaos_tests {
     /// meaningful parity target is per-step (and perceptual), not end-to-end.
     #[test]
     fn loop_is_chaotic() {
+        crate::need_goldens!();
         let emb = g("a3_embeds.npy");
         let latent = g("prompt_latent.npy");
         let t = emb.shape[0];

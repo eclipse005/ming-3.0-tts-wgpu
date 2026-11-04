@@ -703,6 +703,7 @@ mod tests {
 
     #[test]
     fn constants_match_python() {
+        crate::need_goldens!();
         let golden = load("tasks.json");
         let constants = &golden["constants"];
 
@@ -779,6 +780,7 @@ mod tests {
 
     #[test]
     fn params_test_kwargs_match_python() {
+        crate::need_goldens!();
         let golden = load("tasks.json");
         let cases = golden["cases"].as_array().unwrap();
         assert_eq!(cases.len(), 36, "expected the 36 params_test cases");
@@ -795,7 +797,7 @@ mod tests {
                 "case {index} ({id}) kwargs differ from Python"
             );
             compared += 1;
-            if compared % 6 == 0 {
+            if compared.is_multiple_of(6) {
                 println!("params_test cases compared: {compared}");
             }
         }
@@ -804,6 +806,7 @@ mod tests {
 
     #[test]
     fn variant_cases_match_python() {
+        crate::need_goldens!();
         let golden = load("tasks.json");
         let variants = golden["variants"].as_array().unwrap();
         let mut ok = 0usize;
@@ -844,6 +847,7 @@ mod tests {
 
     #[test]
     fn bare_functions_match_python() {
+        crate::need_goldens!();
         let golden = load("tasks.json");
         let functions = &golden["functions"];
 

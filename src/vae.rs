@@ -146,7 +146,6 @@ impl VaeEncoder {
     }
 
     #[cfg(test)]
-
     pub fn encode_stack_check(&self, embeds: &[f32], t: usize) -> Result<Vec<f32>> {
         let x = self.gpu.upload_f32(embeds, "v.e2");
         let h = self.stack(&self.enc, x, t)?;
@@ -155,7 +154,6 @@ impl VaeEncoder {
     }
 
     #[cfg(test)]
-
     pub fn stack_range_check(&self, embeds: &[f32], t: usize, r: std::ops::Range<usize>) -> Result<Vec<f32>> {
         let x = self.gpu.upload_f32(embeds, "v.e2");
         let h = self.stack(&self.enc[r], x, t)?;
@@ -163,9 +161,8 @@ impl VaeEncoder {
     }
 
     #[cfg(test)]
-
     pub fn agg_check(&self, enc_out: &[f32], t_frames: usize) -> Result<Vec<f32>> {
-        let p_count = (t_frames + PATCH - 1) / PATCH;
+        let p_count = t_frames.div_ceil(PATCH);
         let padded = p_count * PATCH;
         let mut seq = vec![0f32; padded * 5 * HIDDEN];
         for p in 0..p_count {

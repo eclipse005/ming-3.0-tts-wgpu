@@ -1,3 +1,4 @@
 /target
+/goldens
 __pycache__/
 *.pyc

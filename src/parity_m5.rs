@@ -33,6 +33,7 @@ mod m5_c6_tests {
     /// reference trajectory.
     #[test]
     fn c6_loop_step_by_step() {
+        crate::need_goldens!();
         let emb = g("c6_embeds.npy");
         let z_ref = g("c6_z_steps.npy");
         let lat_ref = g("c6_latents.npy");
@@ -94,6 +95,7 @@ mod m2_block0_tests {
     /// those two are transposed before comparing.
     #[test]
     fn block0_op_by_op() {
+        crate::need_goldens!();
         let x = g("m2bisect_x.npy");
         let c = g("m2bisect_c.npy");
         let lh = g("m2bisect_lh.npy");
@@ -154,6 +156,7 @@ mod long_prompt_tests {
     /// `FlowLoss.sample` call (tools/dump_z0.py), plus the exact ids.
     #[test]
     fn long_prompt_prefill_matches_python() {
+        crate::need_goldens!();
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
         let gpu = Gpu::new().unwrap();
         let table = weights.get("model.model.embed_tokens.weight").unwrap();
@@ -205,6 +208,7 @@ mod long_audio_tests {
     /// out corrupted -- and no params_test case was long enough to notice.
     #[test]
     fn vae_decodes_past_the_llm_window() {
+        crate::need_goldens!();
         let lat = g("long_dec_lat.npy");
         let want = g("long_dec_wav.npy");
         let t_lat = lat.shape[0];
@@ -223,6 +227,7 @@ mod long_audio_tests {
     /// reference's own RNG so the sampled latent can be compared directly.
     #[test]
     fn vae_encodes_past_the_llm_window() {
+        crate::need_goldens!();
         let wav = g("long_enc_wav.npy");
         let want = g("long_enc_lat.npy");
         let weights = Weights::load(&model_dir().join("model.safetensors")).unwrap();
@@ -265,6 +270,7 @@ mod m2_pair_tests {
     /// silently.
     #[test]
     fn cfg_pair_matches_two_single_forwards() {
+        crate::need_goldens!();
         let x = g("m2bisect_x.npy");
         let c = g("m2bisect_c.npy");
         let lh = g("m2bisect_lh.npy");
@@ -329,6 +335,7 @@ mod gemm_bench {
     /// row exactly (same weights, same x row).
     #[test]
     fn vec4_single_matches_multi() {
+        crate::need_goldens!();
         let gpu = Gpu::new().unwrap();
         let ops = Ops::new(gpu.clone());
         for (rows, inf) in [(896usize, 896usize), (4864, 896), (1024, 1024), (4096, 1024)] {
@@ -352,14 +359,14 @@ mod gemm_bench {
     /// The vec4 six-token kernel must reproduce the 8-token kernel's rows.
     #[test]
     fn vec4_six_matches_t8() {
+        crate::need_goldens!();
         let gpu = Gpu::new().unwrap();
         let ops = Ops::new(gpu.clone());
         for (rows, inf) in [(1024usize, 1024usize), (4096, 1024), (1024, 4096)] {
             let lin = lin_of(&gpu, rows, inf);
-            let mut xv = vec![0f32; 8 * inf];
-            for j in 0..8 * inf {
-                xv[j] = ((j % 23) as f32 - 11.0) * 0.017;
-            }
+            let xv: Vec<f32> = (0..8 * inf)
+                .map(|j| ((j % 23) as f32 - 11.0) * 0.017)
+                .collect();
             let xb = gpu.upload_f32(&xv, "iso6.x");
             let y6 = ops.linear(&lin, &xb, 6).unwrap();
             let y8 = ops.linear(&lin, &xb, 8).unwrap();   // 8 tokens -> T8 kernel
@@ -374,6 +381,7 @@ mod gemm_bench {
     /// Tiled prefill must match the generic kernel and should be faster.
     #[test]
     fn prefill_tile_matches_generic() {
+        crate::need_goldens!();
         let gpu = Gpu::new().unwrap();
         let old_env = std::env::var("MING_PREFILL").ok();
         std::env::set_var("MING_PREFILL", "base");

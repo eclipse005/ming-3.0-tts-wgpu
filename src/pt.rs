@@ -627,6 +627,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_files() {
+        crate::need_goldens!();
         let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("goldens");
         let path = base.join("spk_tensor.pt");
         if !path.exists() {
@@ -649,6 +650,7 @@ mod tests {
 
     #[test]
     fn reads_tensor_and_dict_files() {
+        crate::need_goldens!();
         let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("goldens");
         for name in ["spk_tensor.pt", "spk_dict.pt"] {
             let path = base.join(name);

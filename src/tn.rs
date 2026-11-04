@@ -389,6 +389,7 @@ mod tests {
     /// pynini chain (Chinese only).
     #[test]
     fn matches_reference_goldens() {
+        crate::need_goldens!();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("goldens/tn_cases.json");
         let raw = std::fs::read_to_string(&path).expect("read tn_cases.json");
         let cases: Vec<serde_json::Value> = serde_json::from_str(&raw).expect("parse tn_cases.json");
