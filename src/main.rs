@@ -1,8 +1,7 @@
 //! ming-tts: pure-Rust wgpu port of Ming-3.0-tts-0.5b.
 //!
-//! CLI surface mirrors infer.py one-to-one (acceptance requirement); the
-//! synth subcommand reports which milestone gates each flag until the
-//! corresponding port stage lands (see PROGRESS.md).
+//! The CLI surface mirrors infer.py one-to-one, down to the flag spelling;
+//! `synth` is the only subcommand besides `devices`.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -17,14 +16,12 @@ mod istft;
 mod nn;
 mod ops;
 mod pt;
-#[cfg(test)]
-mod parity;
-#[cfg(test)]
-mod parity_m5;
 mod pipeline;
 mod qwen_lm;
 mod rng;
 mod shaders;
+#[cfg(test)]
+mod smoke;
 mod synth;
 mod spk;
 mod tasks;

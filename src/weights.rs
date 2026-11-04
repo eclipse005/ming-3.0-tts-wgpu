@@ -118,16 +118,6 @@ impl Weights {
             .with_context(|| format!("missing tensor {name}"))
     }
 
-    #[cfg(test)]
-    pub fn names_matching(&self, pat: &str) -> Vec<&String> {
-        let mut v: Vec<&String> = self
-            .map
-            .keys()
-            .filter(|k| k.contains(pat))
-            .collect();
-        v.sort();
-        v
-    }
 }
 
 /// bf16 bit widen used everywhere (single source of truth for the semantics).

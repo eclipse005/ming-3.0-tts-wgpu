@@ -208,21 +208,6 @@ impl Kernel {
 // ---- one-shot helpers (M0 parity tests, small projections) ----
 
 /// y = rmsnorm(x) * w, one row of length n per workgroup.
-#[cfg(test)]
-pub fn rmsnorm(gpu: &Gpu, x: &[f32], w: &[f32], n: usize, eps: f32) -> Result<Vec<f32>> {
-    assert_eq!(x.len() % n, 0, "x rows not multiple of n");
-    let rows = x.len() / n;
-    let x_buf = gpu.upload_f32(x, "x");
-    let w_buf = gpu.upload_f32(w, "w");
-    let y_buf = gpu.storage((rows * n * 4) as u64, "y");
-    let mut u = [0u8; 16];
-    u[0..4].copy_from_slice(&(n as u32).to_le_bytes());
-    u[4..8].copy_from_slice(&eps.to_le_bytes());
-    let (bgl, pipe) = make_pipeline(gpu, shaders::RMSNORM, 2);
-    record(gpu, &bgl, &pipe, &u, &[&x_buf, &w_buf], &y_buf, rows as u32, 1);
-    gpu.read_f32(&y_buf, rows * n)
-}
-
 /// gemv with already-resident weight/bias buffers (no re-upload per call).
 pub fn gemv_bf16w_buf(
     gpu: &Gpu,
@@ -241,23 +226,4 @@ pub fn gemv_bf16w_buf(
     record(gpu, &bgl, &pipe, &u, &[w_buf, &x_buf, b_buf], &y_buf,
            rows.div_ceil(8) as u32, 1);
     gpu.read_f32(&y_buf, rows)
-}
-
-/// y = W @ x + b, W bf16 [rows, in] packed 2/u32; pass zeros for no bias.
-#[cfg(test)]
-pub fn gemv_bf16w(
-    gpu: &Gpu,
-    w_packed: &[u32],
-    x: &[f32],
-    bias: &[f32],
-    rows: usize,
-    in_features: usize,
-) -> Result<Vec<f32>> {
-    let in_words = in_features / 2;
-    assert_eq!(w_packed.len(), rows * in_words, "packed weight size mismatch");
-    assert_eq!(x.len(), in_features, "activation length mismatch");
-    assert_eq!(bias.len(), rows, "bias length mismatch");
-    let w_buf = gpu.upload_u32(w_packed, "w");
-    let b_buf = gpu.upload_f32(bias, "b");
-    gemv_bf16w_buf(gpu, &w_buf, &b_buf, x, rows, in_features)
 }

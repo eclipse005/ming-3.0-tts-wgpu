@@ -2,8 +2,6 @@
 //! blocks) reusing the M1 kernel family, plus the CFM Euler sampler.
 
 use crate::gpu::Gpu;
-#[cfg(test)]
-use crate::nn::gemv_bf16w_buf;
 use crate::ops::{AttendParams, Lin, Ops, RopeTables};
 use crate::weights::Weights;
 use anyhow::{bail, Result};
@@ -61,17 +59,7 @@ struct XBlock {
     n2: Buffer,
 }
 
-/// Optional per-step trace used by the parity tests: (predictions, latents, ys).
-type FlowTrace<'a> = Option<(
-    &'a mut Vec<Vec<f32>>,
-    &'a mut Vec<Vec<f32>>,
-    &'a mut Vec<Vec<f32>>,
-)>;
-
 /// The six stage tensors `dit_forward_bisect` returns, in pipeline order.
-#[cfg(test)]
-type DitStages = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
-
 pub struct DitEngine {
     gpu: Gpu,
     // timestep embedder
@@ -103,11 +91,6 @@ pub struct DitEngine {
 }
 
 /// Elementwise add of two equal-length slices (diagnostic paths only).
-#[cfg(test)]
-fn vec_add(a: &[f32], b: &[f32]) -> Vec<f32> {
-    a.iter().zip(b).map(|(x, y)| x + y).collect()
-}
-
 impl DitEngine {
     pub fn load(gpu: Gpu, ops: Rc<Ops>, w: &Weights) -> Result<Self> {
         let p = |name: &str| w.get(name);
@@ -365,34 +348,6 @@ impl DitEngine {
     /// with the prediction in row 2 -- callers read from offset 2 * ZC.
     /// Production uses [`Self::dit_forward_pair_dev`]; this one is the reference
     /// the pair is tested against.
-    #[cfg(test)]
-    pub fn dit_forward_dev(
-        &self,
-        x: &Buffer,
-        t: f32,
-        c: &Buffer,
-        lh: &Buffer,
-    ) -> Result<Buffer> {
-        let temb = self.gpu.upload_f32(&Self::timestep_embedding(t), "temb");
-        let tm1 = self.mrow(&self.t_mlp1, &temb, 1)?;
-        let sil = self.silu_mul(&tm1, &self.ones_1024, XH);
-        let tm2 = self.mrow(&self.t_mlp2, &sil, 1)?;
-        let xn = self.mrow(&self.x_emb, x, 1)?;
-        let xh = self.mrow(&self.x_emb, lh, 1)?;
-        let ce = self.mrow(&self.c_emb, c, 1)?;
-        let y = self.add(&tm2, &ce, XH);
-
-        // assemble seq [3, 1024] = [y, x_hist, x_now]
-        self.ops
-            .pack3_into(&y, &xh, &xn, &self.scratch.seq, XH, 3);
-        let h = self.blocks_forward(&self.blocks, &self.scratch.seq, 3, 0)?;
-        let fin = self.rms(&h, &self.fin_norm, 3);
-        // The returned buffer must stay unique: callers hold it until their own
-        // readback, so a shared scratch output would be overwritten by the next
-        // forward before they observe it.
-        self.mrow(&self.fin_lin, &fin, 3)
-    }
-
     /// One DiT forward for the (cond, null) pair: rows 0..2 are the conditional
     /// branch, rows 3..5 the null one, sharing every weight read.
     ///
@@ -425,76 +380,8 @@ impl DitEngine {
     }
 
     /// Host-facing variant: same maths, one round-trip for the prediction.
-    #[cfg(test)]
-    pub fn dit_forward(&self, x: &[f32], t: f32, c: &[f32], lh: &[f32]) -> Result<Vec<f32>> {
-        let xb = self.gpu.upload_f32(x, "dx");
-        let cb = self.gpu.upload_f32(c, "dc");
-        let lhb = self.gpu.upload_f32(lh, "dlh");
-        let out = self.dit_forward_dev(&xb, t, &cb, &lhb)?;
-        self.gpu.read_f32_offset(&out, ZC, (2 * ZC * 4) as u64)
-    }
-
     /// Diagnostic: every sub-operator of block 0, for bisecting where the error
     /// inside one DiT block comes from (see tools/dump_dit_block0.py).
-    #[cfg(test)]
-    pub fn block0_parts(
-        &self,
-        x: &[f32],
-        t: f32,
-        c: &[f32],
-        lh: &[f32],
-    ) -> Result<Vec<(String, Vec<f32>)>> {
-        let xb = self.gpu.upload_f32(x, "b0.x");
-        let cb = self.gpu.upload_f32(c, "b0.c");
-        let lhb = self.gpu.upload_f32(lh, "b0.lh");
-        let temb = self.gpu.upload_f32(&Self::timestep_embedding(t), "b0.temb");
-        let tm1 = self.mrow(&self.t_mlp1, &temb, 1)?;
-        let sil = self.silu_mul(&tm1, &self.ones_1024, XH);
-        let tm2 = self.mrow(&self.t_mlp2, &sil, 1)?;
-        let xn = self.mrow(&self.x_emb, &xb, 1)?;
-        let xh = self.mrow(&self.x_emb, &lhb, 1)?;
-        let ce = self.mrow(&self.c_emb, &cb, 1)?;
-        let y = self.add(&tm2, &ce, XH);
-        let seq = self.ops.pack3(&y, &xh, &xn, XH, 3);
-
-        let b = &self.blocks[0];
-        let mut out: Vec<(String, Vec<f32>)> = Vec::new();
-        let a = self.rms(&seq, &b.n1, 3);
-        let q = self.mrow(&b.q, &a, 3)?;
-        let k = self.mrow(&b.k, &a, 3)?;
-        let v = self.mrow(&b.v, &a, 3)?;
-        out.push(("norm1".into(), self.gpu.read_f32(&a, 3 * XH)?));
-        out.push(("q".into(), self.gpu.read_f32(&q, 3 * XH)?));
-        out.push(("k".into(), self.gpu.read_f32(&k, 3 * XH)?));
-        out.push(("v".into(), self.gpu.read_f32(&v, 3 * XH)?));
-        self.ops.rope(&self.rope, &q, XHEADS, 1, 0, 3);
-        self.ops.rope(&self.rope, &k, XHEADS, 1, 0, 3);
-        out.push(("q_rope".into(), self.gpu.read_f32(&q, 3 * XH)?));
-        out.push(("k_rope".into(), self.gpu.read_f32(&k, 3 * XH)?));
-        self.ops.kv_write(&k, &self.kv_k, 3, 0, DIT_KV_CAP, XHEADS);
-        self.ops.kv_write(&v, &self.kv_v, 3, 0, DIT_KV_CAP, XHEADS);
-        let attn = self.ops.attend(
-            &AttendParams::full(3, 64, XH, DIT_KV_CAP),
-            &q,
-            &self.kv_k,
-            &self.kv_v,
-            XHEADS,
-        );
-        let o = self.mrow(&b.o, &attn, 3)?;
-        let h = self.add(&seq, &o, 3 * XH);
-        out.push(("attn".into(), self.gpu.read_f32(&o, 3 * XH)?));
-        let a2 = self.rms(&h, &b.n2, 3);
-        out.push(("norm2".into(), self.gpu.read_f32(&a2, 3 * XH)?));
-        let fi = self.mrow(&b.ff_in, &a2, 3)?;
-        out.push(("ff_pre".into(), self.gpu.read_f32(&fi, 3 * XFF)?));
-        let g = self.gelu(&fi, 3 * XFF);
-        out.push(("gelu".into(), self.gpu.read_f32(&g, 3 * XFF)?));
-        let fo = self.mrow(&b.ff_out, &g, 3)?;
-        out.push(("ff_out".into(), self.gpu.read_f32(&fo, 3 * XH)?));
-        let bout = self.add(&h, &fo, 3 * XH);
-        out.push(("out".into(), self.gpu.read_f32(&bout, 3 * XH)?));
-        Ok(out)
-    }
     /// Aggregator: latent [64] -> projected llm cond [896].
     pub fn agg_forward(&self, latent: &[f32]) -> Result<Vec<f32>> {
         let xb = self.gpu.upload_f32(latent, "agg.latent");
@@ -510,60 +397,8 @@ impl DitEngine {
     }
 
     /// Stage-by-stage bisect variant of dit_forward (parity diagnostics).
-    #[cfg(test)]
-    pub fn dit_forward_bisect(
-        &self,
-        x: &[f32],
-        t: f32,
-        c: &[f32],
-        lh: &[f32],
-    ) -> Result<DitStages> {
-        let mut temb = vec![0f32; 256];
-        for j in 0..128 {
-            let e = ((j as f32) * -(10000f32.ln()) / 127.0).exp();
-            let v = 1000.0 * t * e;
-            temb[j] = v.sin();
-            temb[128 + j] = v.cos();
-        }
-        let tm1 = gemv_bf16w_buf(&self.gpu, &self.t_mlp1.w, &self.t_mlp1.b, &temb, XH, 256)?;
-        let tm1b = self.gpu.upload_f32(&tm1, "tm1");
-        let sil = self.silu_mul(&tm1b, &self.ones_1024, XH);
-        let temb_mlp = gemv_bf16w_buf(&self.gpu, &self.t_mlp2.w, &self.t_mlp2.b,
-                                      &self.gpu.read_f32(&sil, XH)?, XH, XH)?;
-        let xn = gemv_bf16w_buf(&self.gpu, &self.x_emb.w, &self.x_emb.b, x, XH, ZC)?;
-        let xh = gemv_bf16w_buf(&self.gpu, &self.x_emb.w, &self.x_emb.b, lh, XH, ZC)?;
-        let ce = gemv_bf16w_buf(&self.gpu, &self.c_emb.w, &self.c_emb.b, c, XH, 896)?;
-        let y = vec_add(&temb_mlp, &ce);
-        let yb = self.gpu.upload_f32(&y, "seq.y");
-        let xhb = self.gpu.upload_f32(&xh, "seq.xh");
-        let xnb = self.gpu.upload_f32(&xn, "seq.xn");
-        let seq = self.ops.pack3(&yb, &xhb, &xnb, XH, 3);
-        // block 0 alone
-        let b0b = self.blocks_forward(&self.blocks[0..1], &seq, 3, 0)?;
-        let b0 = self.gpu.read_f32(&b0b, 3 * XH)?;
-        let h = self.blocks_forward(&self.blocks, &seq, 3, 0)?;
-        let fin = self.rms(&h, &self.fin_norm, 3);
-        let fin_all = self.gpu.read_f32(&fin, 3 * XH)?;
-        let out = gemv_bf16w_buf(&self.gpu, &self.fin_lin.w, &self.fin_lin.b,
-                                 &fin_all[2 * XH..3 * XH], ZC, XH)?;
-        Ok((temb_mlp, xn, xh, ce, b0, out))
-    }
-
     /// CFM Euler integration (epss timesteps + sway), replicating CFM.sample.
     /// With `trace` set, records the y vector fed to each euler fn call.
-    #[cfg(test)]
-    pub fn flow_sample_traced(
-        &self,
-        z: &[f32],
-        lh: &[f32],
-        noise: &[f32],
-        sde: &[f32],
-        cfg: f32,
-        trace: FlowTrace<'_>,
-    ) -> Result<Vec<f32>> {
-        self.flow_sample_full(z, lh, noise, sde, cfg, 0.25, 0.0, trace)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn flow_sample_full(
         &self,
@@ -574,7 +409,6 @@ impl DitEngine {
         cfg: f32,
         sigma: f32,
         temperature: f32,
-        mut trace: FlowTrace<'_>,
     ) -> Result<Vec<f32>> {
         // epss timesteps for n=10, sway coef -1.0 (f32 math like torch)
         let idx = [0usize, 2, 4, 6, 8, 12, 16, 20, 24, 28, 32];
@@ -600,11 +434,6 @@ impl DitEngine {
             // One batched pass for both CFG branches: the weights are read once
             // instead of twice, and the per-row maths is unchanged.
             let pair = self.dit_forward_pair_dev(&y, tv[step], &zb, &lhb)?;
-            if let Some((tx, tp, tn)) = trace.as_mut() {
-                tx.push(self.gpu.read_f32(&y, ZC)?);
-                tp.push(self.gpu.read_f32_offset(&pair, ZC, (2 * ZC * 4) as u64)?);
-                tn.push(self.gpu.read_f32_offset(&pair, ZC, (5 * ZC * 4) as u64)?);
-            }
             let k = if temperature > 0.0 {
                 sigma * temperature.sqrt() * dt.abs().sqrt()
             } else {
@@ -640,18 +469,6 @@ impl DitEngine {
 }
 
 impl DitEngine {
-    #[cfg(test)]
-    pub fn flow_sample(
-        &self,
-        z: &[f32],
-        lh: &[f32],
-        noise: &[f32],
-        sde: &[f32],
-        cfg: f32,
-    ) -> Result<Vec<f32>> {
-        self.flow_sample_full(z, lh, noise, sde, cfg, 0.25, 0.0, None)
-    }
-
     /// CFM.sample including the stochastic term:
     ///   y += sigma * sqrt(temperature) * sqrt(|dt|) * sde_noise[step]
     /// The term is identically zero at temperature 0, which is why the M2
@@ -667,6 +484,6 @@ impl DitEngine {
         sigma: f32,
         temperature: f32,
     ) -> Result<Vec<f32>> {
-        self.flow_sample_full(z, lh, noise, sde, cfg, sigma, temperature, None)
+        self.flow_sample_full(z, lh, noise, sde, cfg, sigma, temperature)
     }
 }

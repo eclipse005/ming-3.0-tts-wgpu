@@ -173,34 +173,6 @@ impl VaeDecoder {
     }
 
     // ---- bisect helpers (parity diagnostics) ----
-    #[cfg(test)]
-    pub fn fc1_check(&self, latent: &[f32], t_lat: usize) -> Result<Vec<f32>> {
-        self.fc1_out(latent, t_lat)
-    }
-
-    #[cfg(test)]
-    pub fn upsample_check(&self, latent: &[f32], t_lat: usize) -> Result<Vec<f32>> {
-        let e = self.fc1_out(latent, t_lat)?;
-        Ok(linear_upsample(&e, t_lat, HIDDEN, UPSAMPLE))
-    }
-
-    #[cfg(test)]
-    pub fn stack_check(&self, up: &[f32], t: usize) -> Result<Vec<f32>> {
-        let x = self.gpu.upload_f32(up, "dec.up2");
-        let h = self.stack(&self.dec, x, t)?;
-        let z = self.rms(&h, &self.dec_norm, t);
-        self.gpu.read_f32(&z, t * HIDDEN)
-    }
-
-    #[cfg(test)]
-    pub fn head_check(&self, up: &[f32], t: usize) -> Result<Vec<f32>> {
-        let x = self.gpu.upload_f32(up, "dec.up3");
-        let h = self.stack(&self.dec, x, t)?;
-        let z = self.rms(&h, &self.dec_norm, t);
-        let o = self.mrow(&self.head, &z, t)?;
-        self.gpu.read_f32(&o, t * self.head.rows)
-    }
-
 }
 
 fn linear_upsample(x: &[f32], t_in: usize, ch: usize, scale: usize) -> Vec<f32> {

@@ -115,29 +115,13 @@ pub struct Pipeline {
     spk_b: Buffer,
 }
 
-/// Trace of one decode loop, kept for parity assertions.
+/// What one decode loop produced.
 pub struct LoopTrace {
-    /// Per-step hidden states and stop probabilities: kept for the parity test.
-    #[allow(dead_code)]
-    pub z_steps: Vec<Vec<f32>>,
-    #[allow(dead_code)]
-    pub stop_probs: Vec<f32>,
     pub latents: Vec<f32>,
-    /// `latents.len() / LATENT_DIM`; read by the parity test, the CLI counts its
-    /// own (it only sees `Decoded`).
-    #[allow(dead_code)]
-    pub n_latents: usize,
     pub stopped_at: Option<usize>,
 }
 
 impl Pipeline {
-    /// Auto-preference loader (tests). The CLI uses [`Self::load_pref`] so
-    /// `--device` is honoured.
-    #[allow(dead_code)]
-    pub fn load(model_dir: &Path, with_encoder: bool) -> Result<Self> {
-        Self::load_pref(model_dir, with_encoder, crate::gpu::DevicePref::Auto)
-    }
-
     /// `pref` is the CLI's `--device` (cuda:0 / igpu / cpu) resolved to a class
     /// of adapter. Everything downstream shares the one device this picks.
     pub fn load_pref(
@@ -247,8 +231,6 @@ impl Pipeline {
         let stop_trace = std::env::var("MING_STOP_TRACE").is_ok();
         let steps = p.max_decode_steps.min(budget);
         let mut latents: Vec<f32> = Vec::new();
-        let mut z_steps = Vec::new();
-        let mut probs = Vec::new();
         let mut stopped_at = None;
         let mut pos = t;
 
@@ -261,8 +243,6 @@ impl Pipeline {
                 &z, &history, &nz, &sde, p.cfg, p.sigma, p.temperature)?;
             dit_time += t_d.elapsed();
             nan_report("cfm.latent", &lat);
-            z_steps.push(z.clone());
-            probs.push(prob[1]);
             if stop_trace {
                 println!("    step {step:2}: stop_prob {:.6}", prob[1]);
             }
@@ -310,13 +290,7 @@ impl Pipeline {
                 prefill, t, dit_time, llm_time
             );
         }
-        Ok(LoopTrace {
-            latents,
-            n_latents,
-            z_steps,
-            stop_probs: probs,
-            stopped_at,
-        })
+        Ok(LoopTrace { latents, stopped_at })
     }
 
     /// Latents [n, 64] -> waveform at 44.1 kHz.

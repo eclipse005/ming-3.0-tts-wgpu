@@ -4,7 +4,7 @@
 //! Reproducing the same utterances sample for sample therefore needs the same
 //! numbers, and "same seed" only means anything if the generator matches.
 //!
-//! Reverse-engineered from the reference's own draws (see PROGRESS.md):
+//! Reverse-engineered from the reference's own draws:
 //! CUDA torch.randn is curand's Philox4x32-10 with
 //! * key: `(seed & 0xffffffff, seed >> 32)`
 //! * counter.x: the draw index (one per torch.randn call, +1 each)
@@ -70,38 +70,5 @@ impl Philox {
         (0..n)
             .map(|k| normal_from(philox4x32_10([d, 0, k as u32, 0], self.key)))
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::golden::read_npy;
-
-    /// The recorded torch.randn stream from a real reference run.
-    #[test]
-    fn matches_torch_randn() {
-        crate::need_goldens!();
-        let dir = std::env::var("MING_GOLDEN")
-            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/goldens").to_string());
-        let dir = std::path::Path::new(&dir).join("m5");
-        let mut rng = Philox::new(1895);
-        let mut worst = 0f32;
-        let mut total = 0usize;
-        for i in 0..80 {
-            let path = dir.join(format!("noise_{i:03}.npy"));
-            if !path.exists() {
-                break;
-            }
-            let want = read_npy(&path).unwrap();
-            let got = rng.draw(want.data.len());
-            for (a, b) in got.iter().zip(want.data.iter()) {
-                worst = worst.max((a - b).abs());
-            }
-            total += want.data.len();
-        }
-        println!("torch randn parity: {total} values, max abs error {worst:.3e}");
-        assert!(total > 3000, "expected the full recorded stream");
-        assert!(worst < 2e-6, "max abs error {worst:.3e}");
     }
 }

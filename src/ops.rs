@@ -583,18 +583,6 @@ impl Ops {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn rms_into(&self, x: &Buffer, w: &Buffer, y: &Buffer, rows: usize, dim: usize) {
-        self.k_rms.run(
-            &self.gpu,
-            &uni2(dim as u32, RMS_EPS.to_bits()),
-            &[x, w],
-            y,
-            rows as u32,
-            1,
-        );
-    }
-
     pub fn rms_into_cached(
         &self,
         x: &Buffer,
@@ -867,14 +855,6 @@ impl Ops {
         );
     }
 
-    /// Assemble [row0, row1, row2] of width `dim` into one buffer.
-    #[allow(dead_code)]
-    pub fn pack3(&self, a: &Buffer, b: &Buffer, c: &Buffer, dim: usize, rows: usize) -> Buffer {
-        let y = self.gpu.storage((rows * dim * 4) as u64, "pack.y");
-        self.pack3_into(a, b, c, &y, dim, rows);
-        y
-    }
-
     pub fn pack3_into(
         &self,
         a: &Buffer,
@@ -894,45 +874,6 @@ impl Ops {
         );
     }
 
-    #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
-    pub fn pack3_into_cached(
-        &self,
-        a: &Buffer,
-        b: &Buffer,
-        c: &Buffer,
-        y: &Buffer,
-        dim: usize,
-        rows: usize,
-        key: u64,
-    ) {
-        self.k_pack3.run_cached(
-            &self.gpu,
-            key,
-            &uni1(dim as u32),
-            &[a, b, c],
-            y,
-            (rows * dim).div_ceil(256) as u32,
-            1,
-        );
-    }
-
-    /// Assemble [y_cond, x_hist, x_now, y_null, x_hist, x_now] of width `dim`.
-    #[allow(dead_code)]
-    pub fn pack6(
-        &self,
-        y_cond: &Buffer,
-        x_hist: &Buffer,
-        x_now: &Buffer,
-        y_null: &Buffer,
-        dim: usize,
-    ) -> Buffer {
-        let rows = 6;
-        let y = self.gpu.storage((rows * dim * 4) as u64, "pack6.y");
-        self.pack6_into(y_cond, x_hist, x_now, y_null, &y, dim);
-        y
-    }
-
     pub fn pack6_into(
         &self,
         y_cond: &Buffer,
@@ -945,30 +886,6 @@ impl Ops {
         let rows = 6;
         self.k_pack6.run(
             &self.gpu,
-            &uni1(dim as u32),
-            &[y_cond, x_hist, x_now, y_null],
-            y,
-            (rows * dim).div_ceil(256) as u32,
-            1,
-        );
-    }
-
-    #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)] // orthogonal shape/cache arguments
-    pub fn pack6_into_cached(
-        &self,
-        y_cond: &Buffer,
-        x_hist: &Buffer,
-        x_now: &Buffer,
-        y_null: &Buffer,
-        y: &Buffer,
-        dim: usize,
-        key: u64,
-    ) {
-        let rows = 6;
-        self.k_pack6.run_cached(
-            &self.gpu,
-            key,
             &uni1(dim as u32),
             &[y_cond, x_hist, x_now, y_null],
             y,

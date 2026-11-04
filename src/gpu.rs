@@ -11,10 +11,8 @@ pub struct Gpu {
     pub device: Device,
     pub queue: Queue,
     /// Informational, printed by `devices` and useful in logs.
-    #[allow(dead_code)]
-    pub adapter_name: String,
-    #[allow(dead_code)]
-    pub backend: &'static str,
+        pub adapter_name: String,
+        pub backend: &'static str,
     pub device_type: wgpu::DeviceType,
     /// Dispatch batching. Every kernel launch used to create its own command
     /// encoder and submit it, which is thousands of WDDM submissions per
@@ -204,18 +202,6 @@ pub fn list_adapters() -> Vec<String> {
 }
 
 impl Gpu {
-    /// Auto-preference entry point (discrete first). The CLI goes through
-    /// [`Gpu::with_pref`] so `--device` is honoured; tests use this one, and
-    /// `MING_DEVICE` lets a test run pin a class without a CLI flag.
-    #[allow(dead_code)]
-    pub fn new() -> Result<Self> {
-        let pref = match std::env::var("MING_DEVICE") {
-            Ok(v) if !v.trim().is_empty() => DevicePref::parse(&v)?,
-            _ => DevicePref::Auto,
-        };
-        Self::with_pref(pref)
-    }
-
     pub fn with_pref(pref: DevicePref) -> Result<Self> {
         let inst = instance();
         let adapters = pollster::block_on(inst.enumerate_adapters(backends()));

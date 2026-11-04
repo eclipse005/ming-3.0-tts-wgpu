@@ -26,7 +26,7 @@ Rust 实现，使用 [wgpu](https://github.com/gfx-rs/wgpu) 做 GPU 加速。
 * 🎙️ 声音克隆：给一段参考录音，或者给预计算好的 `.pt` 说话人向量
 * ✂️ 按句切分长文本，并复刻参考实现的 STYLE 首片重条件
 * 🔤 中英文本规范化：参考实现那套 pynini FST 链 + 正则规则层 + inflect 风格英文数字措辞
-* 🧪 80 个测试对拍 Python 参考的金标；逐阶段误差 1e-7 … 1e-6
+* 🧪 自带一套冒烟测试，以及下面那张逐阶段误差实测表
 
 ### 安装
 
@@ -119,24 +119,28 @@ Tesla P104 上的语速（3.2 s 音频，仅解码）：**RTF ≈ 0.60**，同�
 ### 测试
 
 ```bash
-cargo test --release -- --test-threads=1     # 80 个测试，需要 GPU
+cargo test --release         # 三个冒烟测试，不需要任何模型/数据
 ```
 
-数值和音频测试对拍 `goldens/`（约 67 MB 的 `.npy`/`.pt`，从参考导出）。这个目录**不随仓库
-提交**，所以新 clone 下来这些测试会打印 `[skip]` 后通过，纯文本/解析类测试照常跑。
-要恢复完整覆盖，用 `tools/dump_params_goldens.py` 对着参考 checkout 重新导出 36 例金标，
-放到 `Cargo.toml` 旁边即可。
+* `wav_roundtrip` —— 写一段波形再读回来，逐采样点比对
+* `text_front_end` —— 文本切分 + 参考实现那套规范化链（数字、金额、日期必须变成中文读法），
+  用的是随仓库提供的 `tn_data/`
+* `synthesize_short_utterance` —— 一次端到端合成。能找到 checkpoint 时才跑：用 `MING_MODEL`
+  指向模型目录（默认找 `../Ming-3.0-tts-0.5b`），找不到就打印 `[skip]`
+
+上面那张表里的数值，是对着 Python 参考导出的金标逐阶段比出来的。那些金标不属于源码，
+没有随仓库提交；`tools/` 里保留了在"有参考环境"的机器上重跑整套对拍用的脚本。
 
 ### 验证脚本
 
-| 脚本 | 用途 |
-|---|---|
-| `tools/check_params_align.py` | 跑 36 个上游用例，打印时长比 / rel_l2 / log-mel / 音色余弦（对着存好的参考 WAV） |
-| `tools/_goldens_align.py` | 用金标里记录的抽样序列做同样的比较，不需要 Python（没有 `goldens/` 时自动 `[skip]`） |
-| `tools/stress_compare.py` | 10 例压力集：长文、多分片、极短文本、混排、`--raw_text` |
-| `tools/dump_params_goldens.py` | 记录参考在 36 例上的 `torch.randn` 抽样和音频 |
-| `tools/ref_nocache.py` | 重渲染那几个"复用了缓存 prompt"的用例的参考音频 |
-| `tools/compare_wav.py` | 两个 WAV 的时长 / 电平 / 相关性对比 |
+| 脚本 | 用途 | 需要 |
+|---|---|---|
+| `tools/check_params_align.py` | 跑 36 个上游用例，打印时长比 / rel_l2 / log-mel / 音色余弦 | 参考渲染好的 WAV（`output/params_test/`） |
+| `tools/_goldens_align.py` | 用金标里记录的抽样序列做同样的比较，不需要 Python | 一个 `goldens/` 目录 |
+| `tools/stress_compare.py` | 10 例压力集：长文、多分片、极短文本、混排、`--raw_text` | 一份 Python 参考 checkout |
+| `tools/dump_params_goldens.py` | 记录参考在 36 例上的 `torch.randn` 抽样和音频 | 一份 Python 参考 checkout |
+| `tools/ref_nocache.py` | 重渲染那几个"复用了缓存 prompt"的用例的参考音频 | 一份 Python 参考 checkout |
+| `tools/compare_wav.py` | 两个 WAV 的时长 / 电平 / 相关性对比 | — |
 
 ### 代码结构
 

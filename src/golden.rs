@@ -1,18 +1,12 @@
-//! Golden-file support: a minimal .npy reader (numpy.save v1.0, C order) and
-//! the rel_l2 metric used by every parity assertion.
+//! A minimal .npy reader (numpy.save v1.0, C order).
 //!
-//! This lives outside the tests because the CLI needs it too: MING_NOISE_GOLDEN
-//! replays the reference's torch.randn draws, which are stored as .npy.
-
-// Parts of this module are exercised only by the parity tests (they read
-// goldens) or kept as public API; the release binary does not call them.
+//! `MING_NOISE_GOLDEN` replays the reference's recorded torch.randn draws,
+//! which is what makes a sample-for-sample comparison possible.
 
 use anyhow::{bail, Context, Result};
 
+/// The payload of an `.npy` file, flattened to f32.
 pub struct Npy {
-    /// Read by the parity tests; the runtime only needs `data`.
-    #[allow(dead_code)]
-    pub shape: Vec<usize>,
     pub data: Vec<f32>,
 }
 
@@ -36,7 +30,6 @@ pub fn read_npy(path: &std::path::Path) -> Result<Npy> {
     if fortran.trim() != "False" {
         bail!("fortran-order npy not supported");
     }
-    let shape = parse_shape(&extract(header, "'shape': (")?);
     let dtype = match descr.as_str() {
         "<f4" => D::F32,
         "<f8" => D::F64,
@@ -60,7 +53,7 @@ pub fn read_npy(path: &std::path::Path) -> Result<Npy> {
             .collect(),
         D::Bool => payload.iter().map(|&b| b as f32).collect(),
     };
-    Ok(Npy { shape, data })
+    Ok(Npy { data })
 }
 
 enum D {
@@ -84,60 +77,4 @@ fn extract<'a>(header: &'a str, key: &'a str) -> Result<String> {
         .trim_matches('\'')
         .trim_matches('"')
         .to_string())
-}
-
-fn parse_shape(s: &str) -> Vec<usize> {
-    s.trim_end_matches(',')
-        .split(',')
-        .filter_map(|p| p.trim().parse::<usize>().ok())
-        .collect()
-}
-
-#[cfg(test)]
-pub fn rel_l2(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    let mut num = 0.0f64;
-    let mut den = 0.0f64;
-    for (x, y) in a.iter().zip(b) {
-        let d = (*x - *y) as f64;
-        num += d * d;
-        den += (*y as f64) * (*y as f64);
-    }
-    (num.sqrt() / den.sqrt().max(1e-30)) as f32
-}
-
-/// The verification goldens (~67 MB of `.npy`/`.pt` dumped from the Python
-/// reference) are not part of the source repository; `tools/dump_*.py`
-/// regenerate them against the reference checkout. Tests that compare against
-/// them skip when the directory is absent instead of failing on a missing file.
-#[cfg(test)]
-pub fn goldens_present() -> bool {
-    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *PRESENT.get_or_init(|| {
-        let present = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("goldens").is_dir();
-        if !present {
-            // Straight to the OS handle: `cargo test` captures the print macros
-            // for passing tests, and a silent 3-second "80 passed" would look
-            // like everything was verified.
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr(),
-                "\n[skip] goldens/ is absent -- the numeric and audio tests are \
-                 skipped, only the text/logic ones run (see README, Tests)\n"
-            );
-        }
-        present
-    })
-}
-
-/// First line of any test that reads the numeric/audio goldens.
-#[cfg(test)]
-#[macro_export]
-macro_rules! need_goldens {
-    () => {
-        if !$crate::golden::goldens_present() {
-            eprintln!("[skip] goldens/ absent (see README, Verification)");
-            return;
-        }
-    };
 }

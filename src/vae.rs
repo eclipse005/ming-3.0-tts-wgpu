@@ -137,118 +137,8 @@ impl VaeEncoder {
         Ok(h)
     }
 
-    // ---- bisect helpers (parity diagnostics) ----
-    #[cfg(test)]
-    pub fn embed_check(&self, frames: &[f32], t: usize) -> Result<Vec<f32>> {
-        let x = self.gpu.upload_f32(frames, "v.frames");
-        let e1 = self.mrow(&self.fc1, &x, t)?;
-        self.gpu.read_f32(&self.mrow(&self.fc2, &e1, t)?, t * HIDDEN)
-    }
-
-    #[cfg(test)]
-    pub fn encode_stack_check(&self, embeds: &[f32], t: usize) -> Result<Vec<f32>> {
-        let x = self.gpu.upload_f32(embeds, "v.e2");
-        let h = self.stack(&self.enc, x, t)?;
-        let z = self.rms(&h, &self.enc_norm, t);
-        self.gpu.read_f32(&z, t * HIDDEN)
-    }
-
-    #[cfg(test)]
-    pub fn stack_range_check(&self, embeds: &[f32], t: usize, r: std::ops::Range<usize>) -> Result<Vec<f32>> {
-        let x = self.gpu.upload_f32(embeds, "v.e2");
-        let h = self.stack(&self.enc[r], x, t)?;
-        self.gpu.read_f32(&h, t * HIDDEN)
-    }
-
-    #[cfg(test)]
-    pub fn agg_check(&self, enc_out: &[f32], t_frames: usize) -> Result<Vec<f32>> {
-        let p_count = t_frames.div_ceil(PATCH);
-        let padded = p_count * PATCH;
-        let mut seq = vec![0f32; padded * 5 * HIDDEN];
-        for p in 0..p_count {
-            for f in 0..PATCH {
-                let src = p * PATCH + f;
-                if src < t_frames {
-                    seq[(p * 5 + f) * HIDDEN..(p * 5 + f) * HIDDEN + HIDDEN]
-                        .copy_from_slice(&enc_out[src * HIDDEN..(src + 1) * HIDDEN]);
-                }
-            }
-        }
-        let cls_host = self.gpu.read_f32(&self.cls, HIDDEN)?;
-        for p in 0..p_count {
-            seq[(p * 5 + 4) * HIDDEN..(p * 5 + 4) * HIDDEN + HIDDEN].copy_from_slice(&cls_host);
-        }
-        let seq_buf = self.gpu.upload_f32(&seq, "v.seq");
-        let a_raw = self.stack(&self.agg, seq_buf, p_count * 5)?;
-        let a = self.rms(&a_raw, &self.agg_norm, padded * 5);
-        self.gpu.read_f32(&a, p_count * 5 * HIDDEN)
-    }
-
-    /// Layer-0 sub-stage bisect (parity diagnostics).
-    #[cfg(test)]
-    pub fn layer0_parts_check(&self, embeds: &[f32], t: usize) -> Result<Vec<(String, Vec<f32>)>> {
-        let l = &self.enc[0];
-        let xb = self.gpu.upload_f32(embeds, "v.e0");
-        let a = self.rms(&xb, &l.n1, t);
-        let mut out = vec![("l0_attnln".into(), self.gpu.read_f32(&a, t * HIDDEN)?)];
-        let q = self.mrow(&l.q, &a, t)?;
-        let k = self.mrow(&l.k, &a, t)?;
-        let v = self.mrow(&l.v, &a, t)?;
-        out.push(("l0_q_proj".into(), self.gpu.read_f32(&q, t * HIDDEN)?));
-        out.push(("l0_k_proj".into(), self.gpu.read_f32(&k, t * (KV_HEADS * HEAD_DIM))?));
-        out.push(("l0_v_proj".into(), self.gpu.read_f32(&v, t * (KV_HEADS * HEAD_DIM))?));
-        // Qwen2 rotate-half; the audio encoder runs causal + a 64-token window
-        let mut kv = self.kv.borrow_mut();
-        kv.ensure(&self.gpu, KV_HEADS, HEAD_DIM, ROPE_THETA, t, KV_CAP);
-        let cap = kv.cap;
-        self.ops.rope(&kv.rope, &q, Q_HEADS, 0, 0, t);
-        self.ops.rope(&kv.rope, &k, KV_HEADS, 0, 0, t);
-        let kc = &kv.k;
-        let vc = &kv.v;
-        self.ops.kv_write(&k, kc, t, 0, cap, KV_HEADS);
-        self.ops.kv_write(&v, vc, t, 0, cap, KV_HEADS);
-        if std::env::var("MING_KV_TRACE").is_ok() {
-            let kch = self.gpu.read_f32(kc, KV_HEADS * cap * HEAD_DIM)?;
-            let mut kk = vec![0f32; t * 128];
-            for pos in 0..t {
-                for h in 0..KV_HEADS {
-                    for d in 0..64 {
-                        kk[pos * 128 + h * 64 + d] = kch[(h * cap + pos) * 64 + d];
-                    }
-                }
-            }
-            out.push(("l0_kcache".into(), kk));
-        }
-        let attn = self.ops.attend(
-            &AttendParams::causal(t, 0, Q_HEADS / KV_HEADS, HEAD_DIM, HIDDEN, cap)
-                .with_window(64),
-            &q,
-            kc,
-            vc,
-            Q_HEADS,
-        );
-        let attn_host = self.gpu.read_f32(&attn, t * HIDDEN)?;
-        out.push(("l0_attn".into(), attn_host.clone()));
-        let o = self.mrow(&l.o, &attn, t)?;
-        out.push(("l0_o_proj".into(), self.gpu.read_f32(&o, t * HIDDEN)?));
-        let h = self.add(&xb, &o, t * HIDDEN);
-        let a2 = self.rms(&h, &l.n2, t);
-        let gat = self.mrow(&l.gate, &a2, t)?;
-        let up = self.mrow(&l.up, &a2, t)?;
-        out.push(("l0_gate_proj".into(), self.gpu.read_f32(&gat, t * 4864)?));
-        out.push(("l0_up_proj".into(), self.gpu.read_f32(&up, t * 4864)?));
-        let sil = self.silu_mul(&gat, &up, t * 4864);
-        let d = self.mrow(&l.down, &sil, t)?;
-        out.push(("l0_down_proj".into(), self.gpu.read_f32(&d, t * HIDDEN)?));
-        let hf = self.add(&h, &d, t * HIDDEN);
-        out.push(("layer0".into(), self.gpu.read_f32(&hf, t * HIDDEN)?));
-        Ok(out)
-    }
-
     /// waveform -> (mean, std) gaussian parameters, shape [T_patch, 64] each.
     pub fn encode_params(&self, waveform: &[f32]) -> Result<(Vec<f32>, Vec<f32>, usize)> {
-        let mut out_vec: Vec<(String, Vec<f32>)> = Vec::new();
-        let _ = &out_vec;
         let n = waveform.len();
         let t_frames = n.div_ceil(HOP);
         let mut frames = vec![0f32; t_frames * IN_DIM];
@@ -295,10 +185,8 @@ impl VaeEncoder {
                 &a_host[(p * 5 + 4) * HIDDEN..(p * 5 + 4) * HIDDEN + HIDDEN]);
         }
         let cr = self.gpu.upload_f32(&cls_rows, "v.clsrows");
-        out_vec.push(("fc3_in".into(), cls_rows.clone()));
         let out = self.mrow(&self.fc3, &cr, p_count)?;
         let flat = self.gpu.read_f32(&out, p_count * 128)?;
-        out_vec.push(("fc3_out".into(), flat.clone()));
         // diffusers OobleckDiagonalGaussianDistribution: mean = chunk 0,
         // std = softplus(chunk 1) + 1e-4 -- NOT exp(0.5 * logvar).
         // PyTorch softplus switches to the identity above threshold = 20.
@@ -312,22 +200,7 @@ impl VaeEncoder {
             let sp = if scale > 20.0 { scale } else { (scale.exp() + 1.0).ln() };
             std[i] = sp + 1e-4;
         }
-        out_vec.push(("mean".into(), mean.clone()));
-        out_vec.push(("std".into(), std.clone()));
-        BISECT_OUT.with(|c| *c.borrow_mut() = Some(out_vec.clone()));
         Ok((mean, std, p_count))
     }
 }
 
-/// Per-stage dumps the parity tests read back after an encode.
-type BisectDump = std::cell::RefCell<Option<Vec<(String, Vec<f32>)>>>;
-
-thread_local! {
-    static BISECT_OUT: BisectDump = const { std::cell::RefCell::new(None) };
-}
-impl VaeEncoder {
-    #[cfg(test)]
-    pub fn take_bisect(&self) -> Vec<(String, Vec<f32>)> {
-        BISECT_OUT.with(|c| c.borrow_mut().take()).unwrap_or_default()
-    }
-}

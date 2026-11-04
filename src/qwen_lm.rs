@@ -325,11 +325,6 @@ impl LlmEngine {
     }
 
     /// Prefill `t` tokens; returns the post-final-norm last hidden.
-    #[cfg(test)]
-    pub fn prefill(&mut self, embeds: &[f32], t: usize) -> Result<[f32; 2]> {
-        Ok(self.prefill_full(embeds, t)?.1)
-    }
-
     /// Prefill `t` tokens; returns (last hidden after the final norm, stop probs).
     pub fn prefill_full(&mut self, embeds: &[f32], t: usize) -> Result<(Vec<f32>, [f32; 2])> {
         if embeds.len() != t * HIDDEN {

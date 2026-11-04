@@ -22,13 +22,6 @@ mod vae;
 pub use pipeline::CpuPipeline;
 // The parity tests reach the stage types through crate::cpu::*; the CLI only
 // needs CpuPipeline, so keep these out of release builds.
-#[cfg(test)]
-pub use dit::CpuDit;
-#[cfg(test)]
-pub use llm::CpuLlm;
-#[cfg(test)]
-pub use vae::{CpuVaeDec, CpuVaeEnc};
-
 /// Latent width of one audio frame (shared by the DiT and both VAE towers).
 pub const ZC: usize = 64;
 

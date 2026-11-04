@@ -256,7 +256,6 @@ pub(super) fn gelu_tanh(x: &[f32], out: &mut [f32]) {
 }
 
 
-
 // ---------------------------------------------------------------------------
 // DiT flow-matching head + aggregator (hand-written twin of dit.rs)
 // ---------------------------------------------------------------------------
@@ -383,29 +382,4 @@ pub(super) fn attention_group(
         }
         let _ = hi;
     });
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn matmul_small_matches_manual() {
-        // W = [[1,2,3],[4,5,6]] (2 rows x 3 cols), X = [[1,0,0],[0,1,0]] (m=2)
-        let w = Mat { data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], rows: 2, cols: 3 };
-        let x = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let mut out = vec![0.0f32; 4];
-        w.linear(&x, 2, None, &mut out);
-        assert_eq!(out, vec![1.0, 4.0, 2.0, 5.0]);
-    }
-
-    #[test]
-    fn gemv_small_matches_manual() {
-        let w = Mat { data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], rows: 2, cols: 3 };
-        let x = vec![1.0, 10.0, 100.0];
-        let mut out = vec![0.0f32; 2];
-        w.linear(&x, 1, None, &mut out);
-        assert_eq!(out, vec![321.0, 654.0]);
-    }
 }

@@ -28,8 +28,7 @@ PyTorch, no CUDA toolkit at runtime.
 * ✂️ Sentence-level text splitting, with the STYLE re-conditioning the reference does
 * 🔤 Chinese/English text normalisation: the reference's pynini FST chain, its
   regex rule layer, and inflect-style English number wording
-* 🧪 80 tests against goldens dumped from the Python reference; per-stage parity
-  is 1e-7 … 1e-6
+* 🧪 Small smoke suite, plus the measured per-stage parity table below
 
 ### Install
 
@@ -128,26 +127,31 @@ as a same-window comparison.
 ### Tests
 
 ```bash
-cargo test --release -- --test-threads=1     # 80 tests, needs a GPU
+cargo test --release         # three smoke tests, no assets needed
 ```
 
-The numeric and audio tests compare against `goldens/` (≈67 MB of `.npy`/`.pt`
-dumped from the reference). That directory is **not** shipped here, so on a fresh
-clone those tests print `[skip]` and pass; the text/logic tests still run. To
-restore full coverage, regenerate the goldens against a reference checkout with
-`tools/dump_params_goldens.py` (36-case audio suite) and drop them next to
-`Cargo.toml`.
+* `wav_roundtrip` — write a waveform, read it back, compare samples
+* `text_front_end` — splitting and the reference's normalisation chain over the
+  shipped `tn_data/` automata (digits, money, dates must come out as spoken Chinese)
+* `synthesize_short_utterance` — one end-to-end utterance. It runs when a
+  checkpoint is reachable; point `MING_MODEL` at the downloaded directory (the
+  default is `../Ming-3.0-tts-0.5b`), otherwise it prints `[skip]`.
+
+The numerical comparison behind the table above was done against goldens dumped
+from the Python reference. That data is not part of a source checkout, so it is
+not shipped; `tools/` keeps the harness for re-running it against a machine with
+the reference available.
 
 ### Verification tooling
 
-| Script | Purpose |
-|---|---|
-| `tools/check_params_align.py` | Runs the 36 upstream cases and prints duration ratio / rel_l2 / log-mel / speaker cosine against stored reference WAVs |
-| `tools/_goldens_align.py` | Same comparison against the goldens' recorded noise draws, no Python needed (`[skip]` when `goldens/` is absent) |
-| `tools/stress_compare.py` | 10-case stress set: long text, multi-fragment, tiny inputs, mixed script, `--raw_text` |
-| `tools/dump_params_goldens.py` | Records the reference's `torch.randn` draws and audio for the 36 cases |
-| `tools/ref_nocache.py` | Re-renders the cases whose reference audio reused a cached prompt latch |
-| `tools/compare_wav.py` | Duration / level / correlation between two WAVs |
+| Script | Purpose | Needs |
+|---|---|---|
+| `tools/check_params_align.py` | Runs the 36 upstream cases and prints duration ratio / rel_l2 / log-mel / speaker cosine | the reference's rendered WAVs (`output/params_test/`) |
+| `tools/_goldens_align.py` | Same comparison from recorded noise draws, no Python needed | a `goldens/` directory |
+| `tools/stress_compare.py` | 10-case stress set: long text, multi-fragment, tiny inputs, mixed script, `--raw_text` | a Python reference checkout |
+| `tools/dump_params_goldens.py` | Records the reference's `torch.randn` draws and audio for the 36 cases | a Python reference checkout |
+| `tools/ref_nocache.py` | Re-renders the cases whose reference audio reused a cached prompt | a Python reference checkout |
+| `tools/compare_wav.py` | Duration / level / correlation between two WAVs | — |
 
 ### Layout
 

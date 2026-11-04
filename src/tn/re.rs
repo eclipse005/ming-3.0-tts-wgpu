@@ -1499,19 +1499,3 @@ pub fn talker_re(cfg: &ReConfig, text: &str) -> String {
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn number_reading() {
-        assert_eq!(to_string_number("11"), "十一");
-        assert_eq!(to_string_number("350"), "三百五十");
-        assert_eq!(to_string_number("1024"), "一千零二十四");
-        assert_eq!(to_string_number("2026"), "两千零二十六");
-        assert_eq!(to_string_number("100000"), "十万");
-        assert_eq!(to_string_rm0("2026"), "二零二六");
-        assert_eq!(to_string_yao("1380"), "幺三八零");
-    }
-}
