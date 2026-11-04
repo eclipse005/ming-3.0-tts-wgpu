@@ -758,26 +758,30 @@ set PY=C:\Users\ADMIN\miniconda3\envs\videolingo\python.exe
 | 文件 | 职责 | 不变量 / 注意 |
 |---|---|---|
 | `src/main.rs` | CLI（与 infer.py 同参数面） | clap 必须 `rename_all = "snake_case"` |
-| `src/synth.rs` | 一次合成的编排：条件 → 分片 → 写盘 | 说话人 embedding 必须从**原生**采样率一跳重采样 |
-| `src/pipeline.rs` | 解码环、Noise trait、尾静音裁剪 | 步数/停止判据与参考一致；裁剪先截整帧 |
+| `src/synth.rs` | 参数面 → 任务模板 → 文本分片 → 选后端 | 分片/条件化不在这里 |
+| `src/backend.rs` | 三条后端共用的编排：条件化 → 分片循环 → 写盘 | 设备相关的只有 `Backend` trait 那 6 个算子 |
+| `src/pipeline.rs` | wgpu 后端：解码环、`Noise`、`SynthParams` | 步数/停止判据与参考一致 |
+| `src/cpu/` | 手写 CPU twin（tensor/llm/dit/vae/pipeline） | f32 激活 + bf16 展宽 + rayon，完全不经 wgpu |
 | `src/rng.rs` | torch CUDA randn 精确复刻（Philox4x32-10） | 每个 `randn` = 一次 `draw(n)`，计数 +1 |
-| `src/ops.rs` | **所有设备原语**：Lin / RopeTables / AttendParams / 全套 kernel | 改内核只改这里 |
+| `src/ops.rs` | **所有设备原语**：Lin / RopeTables / AttendParams / 全套 kernel | 改内核只改这里；t=6 与 prefill 按适配器类别选 |
 | `src/nn.rs` | uniform arena + dispatch 录制 | binding 0 是动态偏移 uniform |
-| `src/gpu.rs` | 设备、缓冲、批量提交与 flush | flush 必须 submit + poll |
-| `src/shaders.rs` | 全部 WGSL | DiT 的 GELU 是 **tanh** 变体 |
+| `src/gpu.rs` | 设备、缓冲、批量提交与 flush | 第一个提交只装 24 个 dispatch（否则 P104 掉设备，0.18） |
+| `src/shaders/` | 按家族分模块的 WGSL | DiT 的 GELU 是 **tanh** 变体；模型侧只写 `shaders::NAME` |
 | `src/qwen_lm.rs` | LLM | 窗口 0（全因果），rope θ=1e6 split-half |
 | `src/dit.rs` | DiT + Aggregator + CFM | 窗口 0、双向、rope θ=1e4 **交错** |
 | `src/vae.rs` | VAE 编码器 | 因果 + **滑窗 64**；后验 std = softplus + 1e-4 |
 | `src/vae_dec.rs` | VAE 解码器 | 因果 + 滑窗 64、上采样 ×4 |
 | `src/istft.rs` | CPU iSTFT（rustfft） | 逆变换带 1/N，窗能量包络归一 |
 | `src/text.rs` | 文本前端 | 参考实现的 f 前缀 bug 要照抄 |
+| `src/tn/` | 文本规范化移植（FST 链 + 规则层 + `number_en`） | 97/97 参考金标；FST 数据在 `tn_data/` |
 | `src/tasks.rs` | 任务模板 | 36/36 逐字节；caption JSON 顺序有意义 |
 | `src/tok.rs` | 分词器 + `build_input_ids` | 8 个 pinned id 加载时校验 |
 | `src/spk.rs` | kaldi fbank + CAMPlus ONNX | 16 kHz 输入、均值减除 |
-| `src/audio.rs` | wav 读写 + torchaudio 重采样 | 写盘逐字节复刻 libsndfile |
+| `src/pt.rs` | 无 torch 的 `.pt` 读取器（ZIP + pickle 子集） | 全程边界检查，畸形文件返回错误 |
+| `src/audio.rs` | wav 读写、torchaudio 重采样、尾静音裁剪 | 写盘逐字节复刻 libsndfile |
 | `src/weights.rs` | safetensors 加载（bf16 原样） | 全量拷进 RAM（~2.9 GB） |
 | `src/golden.rs` | npy 读取 + rel_l2 | CLI 的 `MING_NOISE_GOLDEN` 也用它 |
-| `src/parity.rs` | parity 测试（`#[cfg(test)]`） | 与各模块内测试合计 56 个 |
+| `src/parity.rs` | parity 测试（`#[cfg(test)]`） | 与各模块内测试合计 80 个 |
 
 ## 4. 验收数据
 
@@ -825,7 +829,7 @@ A4 / I1-I4 的参考音频是批量脚本**复用缓存 prompt 编码**产出的
 | E2_ip_lingxiyue_happy | 1.0000 | 1.2e-01 | 0.99968 | 0.9996 | 后段分岔 |
 | E3_ip_us_emma | 1.0000 | 1.3e-03 | 1.00000 | 1.0000 |  |
 | F1_japanese | 1.0000 | 4.5e-04 | 1.00000 | 1.0000 |  |
-| F2_korean | 1.0000 | 3.4e-01 | 0.99776 | 0.9914 | 后段分岔 |
+| F2_korean | 1.0000 | 3.4e-01 | 0.99776 | 0.9914 | 后段分岔；**2026-11-04 变成 1.0333（多 1 步），查明是混沌，见 0.19** |
 | F3_german | 1.0000 | 1.6e-02 | 0.99997 | 1.0000 |  |
 | F4_french | 1.0000 | 9.1e-03 | 0.99997 | 1.0000 |  |
 | F5_spanish | 1.0000 | 6.5e-04 | 1.00000 | 1.0000 |  |
@@ -1122,7 +1126,7 @@ cuBLAS 归约 + CUDA 超越函数——4.6 已经用测量证明不可达。**�
 
 | 位置 | 改法 |
 |---|---|
-| `shaders.rs` ATTEND 里 `kbase = kvh * 512u * 64u` | cap 变成 uniform 参数（`AttendParams::cap`），换 `max_cache_len` 不同的模型不用改内核 |
+| ATTEND 里 `kbase = kvh * 512u * 64u`（现在的 `src/shaders/attention.rs`） | cap 变成 uniform 参数（`AttendParams::cap`），换 `max_cache_len` 不同的模型不用改内核 |
 | `gpu.rs` `Backends::VULKAN \| DX12` | 改成 Vulkan/Metal/DX12/GL 全开 + 显式优先级排序，macOS 不再无适配器 |
 | `gpu.rs` `required_limits: Limits::default()` | 改成 `adapter.limits()`，大卡自动可用更大 workgroup / 更大 storage binding |
 

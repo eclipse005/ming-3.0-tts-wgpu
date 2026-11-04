@@ -62,14 +62,15 @@ target\release\ming-tts-wgpu.exe synth ^
   `gpu.rs` 的 `FIRST_SUBMIT_MAX` 已经把它压到 24 个一次 + 立即 drain。改批量/提交逻辑
   时别把这个 prime 弄丢，否则 A4/G2/整套测试会在独显上随机挂（PROGRESS 0.18）。
 
-## 现状（2026-11-03）
+## 现状（2026-11-04）
 
 - 三条后端（`cuda:0` / `igpu` / `cpu`）与 `infer.py` 的参数面、功能面一致：8 种 task、
   分片、克隆（prompt wav 或 `.pt` 说话人向量）、zero-spk、STYLE 首片重条件、中英文本
   规范化（规则层 + FST + inflect 措辞）。唯一没做的是 `infer.py` 本身没暴露的流式。
-- 性能：P104 上 A1（3.2 s 音频）总耗时约 3.0 s（RTF 0.60），Python CUDA Graph 0.782；
-  CPU 后端 RTF ≈ 2.2–2.7（解码 + VAE / 音频时长；原版 Python CPU 4.0–5.3）。这张矿卡
-  热状态会让同一命令差 2.3×，A/B 必须在同一窗口内做。
+- 性能：P104 上 A1 解码（3.2 s 音频）在 10-31 的热状态里是 2.75–2.81 s（RTF 0.60），
+  CPU 后端 RTF ≈ 2.2–2.7（原版 Python CPU 4.0–5.3）。**这两个数只对那天的卡状态成立**：
+  11-04 用同一批代码（连 11-01 的旧二进制）测出来都是 3.9–4.3 s，卡本身就是差 1.4×，
+  不是代码回退。引用 RTF 前必须同窗口重测，A/B 也必须在同一窗口内做。
 - 代码结构：`src/backend.rs` 是三条后端共用的分片编排（`Backend` trait + `synthesize`），
   设备相关的算子留在各自的 `Pipeline` 里；`src/cpu/` 与 GPU 各阶段一一对应；
   `src/tn/` 是文本规范化移植；`src/pt.rs` 是无 torch 的 `.pt` 读取器；
