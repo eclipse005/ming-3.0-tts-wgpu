@@ -71,15 +71,23 @@ target\release\ming-tts-wgpu.exe synth ^
   热状态会让同一命令差 2.3×，A/B 必须在同一窗口内做。
 - 代码结构：`src/backend.rs` 是三条后端共用的分片编排（`Backend` trait + `synthesize`），
   设备相关的算子留在各自的 `Pipeline` 里；`src/cpu/` 与 GPU 各阶段一一对应；
-  `src/tn/` 是文本规范化移植；`src/pt.rs` 是无 torch 的 `.pt` 读取器。
+  `src/tn/` 是文本规范化移植；`src/pt.rs` 是无 torch 的 `.pt` 读取器；
+  `src/shaders/` 按 kernel 家族分模块（gemv / gemv_t1 / gemv_t6 / prefill / attention /
+  elementwise），模型侧仍然只写 `shaders::NAME`。
 
 ## 已知可继续的清理（非功能缺口）
 
-1. `ops.rs` 启动时编译 14 个 GEMV 变体（`MING_T6=base|v8..v14` 等 A/B 口）。性能定稿后
-   可以只留默认赢家；删除前必须在同一热状态下重测 RTF。
-2. `shaders.rs` 的 WGSL 字符串可以按 kernel 家族拆分（1850 行里大部分是生成的
-   `gemv_t6_vec4` 变体）。
+代码层面目前没有已知项。下一项是**性能**决策而不是清理：t=6 的 32-lane warp-per-row
+kernel 在独显上端到端快 10.7%（核显上慢 46%），但它换掉了 t=6 的归约顺序 —— 用金标 36 例
+实测，C6_surprised 的 log-mel 从 0.99647 掉到 0.99405，跌破 4.2 节给"后段相位差"用例
+定的 0.9959，所以没有采纳。要吃这 10% 得连同 36 例 + 压力集重新验收（改
+`ops.rs::Ops::new` 里的 `k_linear_t6` 一行 + `t6_plan` 的 `per_wg`）—— 见 PROGRESS 0.16。
 
-A/B 回退口：`MING_T6=base|v8..v14`、`MING_T1=base|half|v1..v4`、`MING_SCRATCH=0`、
-`MING_LM_FAST=0`、`MING_BIND_CACHE=0`。分段耗时 `MING_PROFILE=1`，
-prefill 单层分段 `MING_LM_PREFILL_PROFILE=1`。
+回退口 / 调试开关：`MING_PREFILL=base`（强制 12-token 窗口 kernel）、`MING_SCRATCH=0`、
+`MING_LM_FAST=0`、`MING_BIND_CACHE=0`；`MING_PROFILE=1` 分段耗时、
+`MING_LM_PREFILL_PROFILE=1` prefill 单层、`MING_MEM=1` 显存、
+`MING_DUMP_WGSL=<dir>` 把编译进去的 WGSL 按内容哈希落盘（核对 shader 重构用）。
+
+验收脚本：`tools/check_params_align.py` 现跑 Python 参考；`tools/_goldens_align.py`
+回放金标里的 `noise_*.npy` 对比 `ref_waveform.npy`，不需要 torch/CUDA 环境，36 例音频门限
+用它（已知 7 例金标本身无法回放，见 PROGRESS 0.16）。

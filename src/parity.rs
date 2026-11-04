@@ -832,6 +832,7 @@ mod kv_write_tests {
     use crate::shaders;
 
     #[test]
+    #[allow(clippy::erasing_op, clippy::identity_op)] // the indices spell out [kv, pos, channel]
     fn kv_write_micro() {
         let gpu = Gpu::new().unwrap();
         let k = kernel(&gpu, shaders::KV_WRITE, 1);

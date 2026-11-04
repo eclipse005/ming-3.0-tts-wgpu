@@ -283,38 +283,17 @@ pub struct Ops {
     k_linear: crate::nn::Kernel,
     k_linear_t4: crate::nn::Kernel,
     k_linear_t8: crate::nn::Kernel,
-    k_linear_v4: crate::nn::Kernel,
-    k_linear_t1hw: crate::nn::Kernel,
-    // Single-token vectorised variants: (8,64,1), (8,128,1), (8,128,2), (16,128,1).
-    k_t1v: [crate::nn::Kernel; 4],
-    t1_variant: Option<usize>,
-    t1_halfwarp: bool,
+    /// Single-token decode: vec4 weight loads, 32 rows per workgroup.
+    k_linear_t1: crate::nn::Kernel,
     k_linear_v4t6: crate::nn::Kernel,
-    k_linear_t8u4: crate::nn::Kernel,
-    k_linear_t8u4_base: crate::nn::Kernel,
-    k_linear_t6v2: crate::nn::Kernel,
-    k_linear_t6hw: crate::nn::Kernel,
-    k_linear_t6qw: crate::nn::Kernel,
-    k_linear_t6fl: crate::nn::Kernel,
-    k_linear_t6v8: crate::nn::Kernel,
-    k_linear_t6v9: crate::nn::Kernel,
-    k_linear_t6v10: crate::nn::Kernel,
-    k_linear_t6v11: crate::nn::Kernel,
-    k_linear_t6v12: crate::nn::Kernel,
-    k_linear_t6v13: crate::nn::Kernel,
-    k_linear_t6v14: crate::nn::Kernel,
-    k_linear_t6win: crate::nn::Kernel,
+    /// Six-token DiT batch: 8 lanes per row, two rows per lane group, two
+    /// granules unrolled. One tuning for every adapter -- see PROGRESS 0.16 for
+    /// why the warp-per-row tuning (10.7% faster on a discrete card) is not
+    /// the default.
+    k_linear_t6: crate::nn::Kernel,
     /// Twelve-token window variant of the vectorised kernel: same micro-kernel,
     /// twice the weight reuse. Used for t > 8 (VAE decode, long prompts).
     k_linear_t12win: crate::nn::Kernel,
-    t6_vec4: bool,
-    t12: bool,
-    t6_specialized: bool,
-    t6_paired: bool,
-    t6_halfwarp: bool,
-    t6_quarterwarp: bool,
-    t6_fourlane: bool,
-    t6_hybrid: bool,
     k_prefill_tile: crate::nn::Kernel,
     /// Tile allowed for post-hoc (decoder) linears: discrete GPUs only.
     prefill_tiled: bool,
@@ -342,56 +321,13 @@ impl Ops {
             k_linear: kernel(&gpu, shaders::GEMV_MROW, 3),
             k_linear_t4: kernel(&gpu, shaders::GEMV_MROW_T4, 3),
             k_linear_t8: kernel(&gpu, shaders::GEMV_MROW_T8, 3),
-            k_linear_v4: kernel(&gpu, shaders::GEMV_V4_T1, 3),
-            k_linear_t1hw: kernel(&gpu, &shaders::gemv_t1_halfwarp(), 3),
-            k_t1v: [
-                kernel(&gpu, &shaders::gemv_t1_vec4(8, 64, 1), 3),
-                kernel(&gpu, &shaders::gemv_t1_vec4(8, 128, 1), 3),
-                kernel(&gpu, &shaders::gemv_t1_vec4(8, 128, 2), 3),
-                kernel(&gpu, &shaders::gemv_t1_vec4(16, 128, 1), 3),
-            ],
-            t1_variant: match std::env::var("MING_T1").unwrap_or_default().as_str() {
-                "base" | "half" => None,
-                "v1" => Some(0),
-                "v2" => Some(1),
-                "v3" => Some(2),
-                "v4" => Some(3),
-                _ => Some(2),
-            },
-            t1_halfwarp: std::env::var("MING_T1").is_ok_and(|v| v == "half"),
+            k_linear_t1: kernel(&gpu, &shaders::gemv_t1_vec4(8, 128, 2), 3),
             k_linear_v4t6: kernel(&gpu, shaders::GEMV_V4_T6, 3),
-            k_linear_t8u4: kernel(&gpu, &shaders::gemv_t6u4(), 3),
-            k_linear_t8u4_base: kernel(&gpu, shaders::GEMV_MROW_T8U4, 3),
-            k_linear_t6v2: kernel(&gpu, shaders::GEMV_T6_PAIRED, 3),
-            k_linear_t6hw: kernel(&gpu, &shaders::gemv_t6_halfwarp(), 3),
-            k_linear_t6qw: kernel(&gpu, &shaders::gemv_t6_quarterwarp(), 3),
-            k_linear_t6fl: kernel(&gpu, &shaders::gemv_t6_fourlane(), 3),
-            // v8: 32 lanes/row, two rows per lane group (16 rows per workgroup).
-            // v9: 8 lanes/row, two rows per lane group (64 rows per workgroup).
-            // v10: same 2-row blocking at 128 threads (32 rows per workgroup).
-            // v11: 8 lanes/row, one row per lane group, vectorised loads only.
-            // v12/v13: like v10 with 2 and 4 granules unrolled per iteration.
-            k_linear_t6v8: kernel(&gpu, &shaders::gemv_t6_vec4(32, 256, 2, 1, false, 6), 3),
-            k_linear_t6v9: kernel(&gpu, &shaders::gemv_t6_vec4(8, 256, 2, 1, false, 6), 3),
-            k_linear_t6v10: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 1, false, 6), 3),
-            k_linear_t6v11: kernel(&gpu, &shaders::gemv_t6_vec4(8, 256, 1, 1, false, 6), 3),
-            k_linear_t6v12: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 2, false, 6), 3),
-            k_linear_t6v13: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 4, false, 6), 3),
-            k_linear_t6v14: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 1, 2, false, 6), 3),
-            // Same shape as the default, but able to slide its six-token window
-            // across a long prompt (prefill).
-            k_linear_t6win: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 2, true, 6), 3),
+            // 8 lanes per row, 2 rows per lane group, 2 granules unrolled.
+            k_linear_t6: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 2, false, 6), 3),
+            // Same shape as the default, but able to slide its token window
+            // across a long prompt (prefill, VAE batch).
             k_linear_t12win: kernel(&gpu, &shaders::gemv_t6_vec4(8, 128, 2, 2, true, 12), 3),
-            // The vectorised 2-row kernel is the default. The older scalar
-            // variants stay reachable through MING_T6=base|spec|v2..v5.
-            t6_vec4: std::env::var("MING_T6")
-                .map_or(true, |v| !matches!(v.as_str(), "base" | "spec" | "v2" | "v3" | "v4" | "v5")),
-            t6_specialized: std::env::var("MING_T6").map_or(true, |v| v != "base"),
-            t6_paired: std::env::var("MING_T6").map_or(true, |v| v != "base" && v != "spec"),
-            t6_halfwarp: std::env::var("MING_T6").is_ok_and(|v| v == "v3"),
-            t6_quarterwarp: std::env::var("MING_T6").is_ok_and(|v| v == "v4"),
-            t6_fourlane: std::env::var("MING_T6").is_ok_and(|v| v == "v5"),
-            t6_hybrid: std::env::var("MING_T6").map_or(true, |v| v == "hybrid"),
             k_prefill_tile: kernel(&gpu, shaders::GEMM_PREFILL_48X64, 3),
             // Large-t strategy follows the adapter class, because the two
             // kernels are bound by different things: the 48x64 tile is compute
@@ -403,7 +339,6 @@ impl Ops {
                 Some("base") => false,
                 _ => gpu.device_type == wgpu::DeviceType::DiscreteGpu,
             },
-            t12: std::env::var("MING_T12").map_or(true, |v| v != "0"),
             k_rope: kernel(&gpu, shaders::ROPE, 2),
             k_attend: kernel(&gpu, shaders::ATTEND, 3),
             k_attend_simple: kernel(&gpu, shaders::ATTEND_SIMPLE, 3),
@@ -449,60 +384,14 @@ impl Ops {
         Ok(y)
     }
 
-    /// Which single-token kernel a layer gets. `None` means the generic
-    /// warp-per-row vec4 kernel, which is what wide projections use.
-    fn t1_plan(&self, lin: &Lin) -> Option<(&crate::nn::Kernel, usize)> {
-        if let Some(v) = self.t1_variant {
-            // Rows per workgroup for (8,64,1), (8,128,1), (8,128,2), (16,128,1).
-            const ROWS: [usize; 4] = [8, 16, 32, 8];
-            return Some((&self.k_t1v[v], ROWS[v]));
-        }
-        // Half-warp only pays when both dimensions are small (LLM q/k/v/o).
-        // Wide projections already saturate memory, and long K doubles the
-        // per-lane work without buying occupancy.
-        if self.t1_halfwarp && lin.rows <= 1024 && lin.in_features <= 1024 {
-            Some((&self.k_linear_t1hw, 16))
-        } else {
-            None
-        }
-    }
-
+    /// Six-token batch (the DiT). The vec4 kernel reads 16 B weight granules,
+    /// so it needs whole 256-wide K; anything else falls back to
+    /// [`Self::k_linear_v4t6`].
     fn t6_plan(&self, lin: &Lin) -> Option<(&crate::nn::Kernel, usize)> {
         if !lin.in_features.is_multiple_of(256) {
             return None;
         }
-        // Four lanes/row wins the isolated K=4096 microbench but only emits
-        // 16 workgroups for a [1024, 4096] layer, so it under-fills the 20 SMs
-        // and loses end-to-end. Keep it behind MING_T6=v5 only.
-        let use_four = self.t6_fourlane;
-        let use_quarter = self.t6_quarterwarp
-            || (self.t6_hybrid && lin.in_features <= 2048);
-        let plan = if self.t6_vec4 {
-            match std::env::var("MING_T6").unwrap_or_default().as_str() {
-                "v8" => (&self.k_linear_t6v8, 16),
-                "v9" => (&self.k_linear_t6v9, 64),
-                "v10" => (&self.k_linear_t6v10, 32),
-                "v11" => (&self.k_linear_t6v11, 32),
-                "v12" => (&self.k_linear_t6v12, 32),
-                "v13" => (&self.k_linear_t6v13, 32),
-                "v14" => (&self.k_linear_t6v14, 16),
-                // Default: two rows per lane group, two granules unrolled.
-                _ => (&self.k_linear_t6v12, 32),
-            }
-        } else if use_four {
-            (&self.k_linear_t6fl, 64)
-        } else if use_quarter {
-            (&self.k_linear_t6qw, 32)
-        } else if self.t6_halfwarp {
-            (&self.k_linear_t6hw, 16)
-        } else if self.t6_paired {
-            (&self.k_linear_t6v2, 8)
-        } else if self.t6_specialized {
-            (&self.k_linear_t8u4, 8)
-        } else {
-            (&self.k_linear_t8u4_base, 8)
-        };
-        Some(plan)
+        Some((&self.k_linear_t6, 32))
     }
 
     /// Same dispatch as [`Self::linear_into`], but for callers that keep the
@@ -534,17 +423,14 @@ impl Ops {
             }
         }
         if t == 1 && lin.in_features.is_multiple_of(8) && lin.rows.is_multiple_of(8) {
-            let (k, per_wg) = self
-                .t1_plan(lin)
-                .unwrap_or((&self.k_linear_v4, 8));
             let key = lin.id.rotate_left(24) ^ x_slot.rotate_left(12) ^ y_slot;
-            k.run_cached(
+            self.k_linear_t1.run_cached(
                 &self.gpu,
                 key,
                 &uni2(lin.rows as u32, (lin.in_features / 8) as u32),
                 &[&lin.w, x, &lin.b],
                 y,
-                lin.rows.div_ceil(per_wg) as u32,
+                lin.rows.div_ceil(32) as u32,
                 1,
             );
             return;
@@ -603,38 +489,12 @@ impl Ops {
         // each weight read feeds twice as many tokens -- this halves the weight
         // traffic of the VAE decoder (t=252: 42 passes -> 21) without the
         // shared-memory transpose the tiled kernel needs.
-        if t > 8 && self.t6_vec4 && self.t12 && lin.in_features.is_multiple_of(128) {
+        if t > 8 && lin.in_features.is_multiple_of(128) {
             let per_wg = 32;
             let mut tok0 = 0usize;
             while tok0 < t {
                 let n = (t - tok0).min(12);
                 self.k_linear_t12win.run(
-                    &self.gpu,
-                    &uni4(
-                        lin.rows as u32,
-                        (lin.in_features / 2) as u32,
-                        n as u32,
-                        tok0 as u32,
-                    ),
-                    &[&lin.w, x, &lin.b],
-                    y,
-                    lin.rows.div_ceil(per_wg) as u32,
-                    1,
-                );
-                tok0 += n;
-            }
-            return;
-        }
-        // Fallback for odd shapes: six-token windows. The kernel only needs
-        // whole vec4 granules, i.e. in_features % 8 == 0; the % 128 guard is
-        // kept because loosening it changes the encoder's reduction order for
-        // no measured gain.
-        if t > 8 && self.t6_vec4 && lin.in_features.is_multiple_of(128) {
-            let per_wg = 32;
-            let mut tok0 = 0usize;
-            while tok0 < t {
-                let n = (t - tok0).min(6);
-                self.k_linear_t6win.run(
                     &self.gpu,
                     &uni4(
                         lin.rows as u32,
@@ -680,15 +540,12 @@ impl Ops {
         }
         // Single-token decode: vec4 (16 B) weight loads instead of one u32.
         if t == 1 && lin.in_features.is_multiple_of(8) && lin.rows.is_multiple_of(8) {
-            let (k, per_wg) = self
-                .t1_plan(lin)
-                .unwrap_or((&self.k_linear_v4, 8));
-            k.run(
+            self.k_linear_t1.run(
                 &self.gpu,
                 &uni2(lin.rows as u32, (lin.in_features / 8) as u32),
                 &[&lin.w, x, &lin.b],
                 y,
-                lin.rows.div_ceil(per_wg) as u32,
+                lin.rows.div_ceil(32) as u32,
                 1,
             );
             return;

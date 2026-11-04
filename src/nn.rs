@@ -136,12 +136,29 @@ pub(crate) struct Kernel {
 }
 
 pub(crate) fn kernel(gpu: &Gpu, src: &str, storage_ro: usize) -> Kernel {
+    dump_wgsl(src);
     let (bgl, pipe) = make_pipeline(gpu, src, storage_ro);
     Kernel {
         bgl,
         pipe,
         cache: RefCell::new(HashMap::new()),
     }
+}
+
+/// MING_DUMP_WGSL=<dir> writes every compiled source into the dir, named by a
+/// hash of its text. That is how a shader refactor is proven to be a pure code
+/// move: dump before and after and compare the two directories (PROGRESS 0.16).
+fn dump_wgsl(src: &str) {
+    let Ok(dir) = std::env::var("MING_DUMP_WGSL") else {
+        return;
+    };
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in src.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    std::fs::create_dir_all(&dir).ok();
+    std::fs::write(format!("{dir}/{h:016x}.wgsl"), src).ok();
 }
 
 impl Kernel {

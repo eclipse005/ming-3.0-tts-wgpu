@@ -518,6 +518,65 @@ CPU 路径一直用零。修复后 CPU 克隆 A3 从 `dur 1.0312 / mel 0.91355 /
   记录的基线完全一致（S5 = 21.6 s / 6 片）。按 4.4 的混沌结论，这是参考侧轨迹分岔，不是
   移植侧回归；等环境恢复 flash-attn 后应重跑一次对拍再更新本节的 rel/mel 数字。
 
+### 0.16 kernel 变体定型 + shader 分家族（2026-11-04）
+
+`ops.rs` 启动时编译 14 个六 token 变体、4 个单 token 变体、两条 t>8 窗口路径，全藏在
+`MING_T6/MING_T1/MING_T12` 后面。先测再删：用一个一次性的交替 A/B 脚本把各个取值在**同一热
+状态**里 round-robin 交替跑（A1 端到端 decode 时间，取中位数、4 轮），因为这张 P104 的
+热状态能让同一条命令差 2.3×，串行 A/B 没有意义。
+
+先量出噪声底：`default` 和 `MING_T6=v12` 是同一份代码，P104 上 3.890 vs 3.835、
+核显上 4.280 vs 4.220 —— 差 1.4%，所以低于 ~1.5% 的差异一律当噪声。
+
+**t=6（DiT 的 CFG batch）**：
+
+| 调参 (lanes, threads, rpl, unroll) | P104 cuda:0 | Intel iGPU |
+|---|---|---|
+| (32,256,2,1) | **3.475 s（−10.7%）** | 6.270 s（+46.5%） |
+| (8,128,2,2) 现默认 | 3.890 s | **4.220 s** |
+| (8,128,2,1) | 3.720 s（−4.4%） | 4.710 s（+10.0%） |
+| (8,256,2,1) / (8,128,1,2) | 3.77–3.93 s | 4.64–4.98 s |
+| paired / halfwarp / hybrid | 3.77–3.87 s | 3.98–4.98 s |
+| base / spec / quarter / fourlane | 4.08–4.89 s（+5…+26%） | 5.14–6.29 s（+20…+47%） |
+
+**结论：不换默认。** 32-lane 那档在独显上确实快 10.7%，但它换掉了 t=6 的归约顺序。用金标
+36 例验（见下）：30 例时长仍然全 1.0000，可 C6_surprised 的 log-mel 从 0.99647 掉到
+0.99405，跌破 4.2 节给"后段相位差"用例定的 0.9959。按"先对齐、再提速"的规矩这一档不收，
+参数写在这里备查：改 `Ops::new` 里的 `k_linear_t6` 为 `gemv_t6_vec4(32,256,2,1,false,6)`
+并把 `t6_plan` 的 `per_wg` 从 32 改成 16（核显上会慢 46%，得按适配器类别分叉）。
+
+**t=1（LLM 解码）**：7 个变体在两种设备上都落在 ±2%（P104 3.84–3.94 s、核显
+3.98–4.05 s），本来就不分胜负 —— 保留默认的 (8,128,2)，连带删掉默认配置下根本走不到的
+通用 `GEMV_V4_T1`（`MING_T1=base` 才能到它）。
+
+**t>8（VAE decode / long prefill 的窗口）**：12-token 窗口比 6-token 快 0.6%（P104）/
+2.9%（核显）→ 保留 12-token，删掉 6-token 回退分支（两者的触发条件完全相同，本来就走不到）。
+
+**改动量**：`Ops` 少 25 个字段、去掉 3 个 `MING_*` 开关（27 个取值）；`shaders.rs`
+1932 → 1374 行（删掉 `GEMV_MROW_T8U4`、`gemv_t6u4`、`GEMV_T6_PAIRED`、`gemv_t6_lanes`、
+三个 lanes 包装、`gemv_t1_halfwarp`、`GEMV_V4_T1`），再按家族拆成
+`shaders/{gemv,gemv_t1,gemv_t6,prefill,attention,elementwise}.rs`（112–364 行/个）+
+`mod.rs` 转导出，模型侧仍然只写 `shaders::NAME`。
+
+**验证**：
+
+- **拆分是纯搬运**：`MING_DUMP_WGSL=<dir>` 把每个编译进去的 WGSL 源码按内容哈希落盘。
+  拆分前后各 21 份，**文件名与内容逐字节相同**；最终版本 20 份，全部来自改动前那 38 份里
+  （没有任何新 shader）。
+- **裁剪不改数值**：`tools/_goldens_align.py` 跑 36 例金标对拍，聚合结果与裁剪前完全一致
+  —— 渲染 29/36、**时长比 29/29 = 1.0000**、mel ≥ 0.995 的 24/29、rel ≤ 5e-2 的 20/29。
+  逐例看只有 B4_pitch_low / F4_french 的 rel_l2 在 1e-3 量级上动了（0.0062→0.0019、
+  0.0134→0.0131），mel 只差 1e-5；对同一份二进制重复跑输出完全一致，说明这是编译产物
+  （buffer/管线分配顺序 → DiT scratch 复用）带来的确定性偏移，不是数值错误 —— 记在这里：
+  **跨 build 的逐采样点对拍在这张卡上做不到，只有门限级对拍可靠。**
+- 80/80 测试（iGPU，199 s）；`cargo build --release` / `cargo clippy --release` 零警告。
+
+**顺带留下的工具**：`tools/_goldens_align.py` —— 36 例音频门限现在不用现跑 Python 参考
+也能验（回放金标里的 `noise_*.npy`，对比同目录的 `ref_waveform.npy`）。它同时暴露出 7 例
+本来就无法回放的用例（A4、F2、G2、I1–I4）：记录下来的抽样序列与当前输入长度对不上
+（例如 I1–I4 记录的首个抽样是 64 个值，而克隆提示要 2688 个），属于金标记录侧的历史问题，
+与 kernel 无关，暂记为已知缺口。
+
 ## 1. 现状
 
 | 验收项 | 状态 | 证据 |
@@ -554,12 +613,8 @@ CPU 路径一直用零。修复后 CPU 克隆 A3 从 `dur 1.0312 / mel 0.91355 /
 | `MING_NOISE_GOLDEN=<dir>` | 注入金标 torch.randn 抽样（`goldens/m5/` 或 `goldens/m5_params/<case>/`），用于逐样本对拍 |
 | `MING_DUMP_IDS=<file>` | 把首条分片的 token id 写盘，用于和参考的 `build_input_ids` 比 |
 | `MING_MAX_PENDING=<n>` | 一次提交的 dispatch 上限（默认 2048） |
-| `MING_T6=base\|spec\|v2\|v3\|v4\|v5` | 回退到旧的标量六 token kernel（A/B 用） |
-| `MING_T6=v8\|v9\|v10\|v11\|v12\|v13\|v14` | 向量化 kernel 的行宽/行数/展开组合，默认 `v12`（8 lanes × 2 行 × 展开 2） |
-| `MING_T1=base\|half` | 回退单 token 路径（默认是向量化 2 行版；`half` 是旧的半 warp 版） |
-| `MING_T1=v1\|v2\|v3\|v4` | 单 token 变体，(8,64,1)/(8,128,1)/(8,128,2)/(16,128,1) |
 | `MING_PREFILL=base` | 关掉 decoder 的 48×64 tile（默认随适配器类别：独显开、核显/CPU 关），见 0.9.1 |
-| `MING_T12=0` | 关闭 t>8 的 12-token 窗口，回到 6-token（A/B 用） |
+| `MING_DUMP_WGSL=<dir>` | 把编译进去的 WGSL 按内容哈希落盘（核对 shader 重构用，见 0.16） |
 | `MING_IN_FLIGHT=<n>` | 允许的在飞 submit 数（默认 16；=1 表示每批都 wait，等价旧行为） |
 | `MING_STOP_TRACE=1` | 每步打印停止概率（排查时长差的唯一可靠手段） |
 | `MING_ALIGN_DEVICE=igpu` | `tools/check_params_align.py` 钉设备（默认 cuda:0） |
