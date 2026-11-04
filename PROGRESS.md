@@ -609,7 +609,51 @@ C6/B2/C1 各降一点点。按"不为提速改轨迹"的既定规矩这一档不
 2. **A4_clone_latent_only 在 P104 上稳定触发 `Buffer with 'readback' label is invalid`**
    （两次都是），换核显就正常（41 latents / 3.20 s）。AGENTS 里记的"P104 偶发掉设备"
    在这条路径上不是偶发，而是可复现；I1–I4 走同样的克隆路径却不掉，差别只在
-   `use_spk_emb` 分支。暂按已知设备问题记录，未深挖。
+   `use_spk_emb` 分支。**已查清并修好，见 0.18。**
+
+### 0.18 P104 掉设备：进程的第一个命令缓冲（2026-11-04)
+
+0.17 留下的 A4 掉卡已经定位到根因，而且它同时就是 AGENTS 里记了很久的"P104 偶发掉设备"。
+
+**现象**：`A4_clone_latent_only`（prompt wav + text，不带 `--use_spk_emb`）在 P104 上几乎
+每次都死：`Buffer with 'readback' label is invalid`；A3（同一条 wav，多一个 `--use_spk_emb`）
+一直正常，核显也一直正常。
+
+**排查**：
+
+1. `device.set_device_lost_callback` 确认是真掉设备（`Device is lost`），第一次
+   `map_async` 只是最先把失效 resource 暴露出来的地方；Windows 事件日志里有成对的
+   nvlddmkm **event 153**（`Error occurred on GPUID`），每次失败一对 —— 是驱动复位，不是
+   我们读错了缓冲区。
+2. 在测试里拿到了稳定 repro（`Pipeline::load_pref(with_encoder)` +
+   `encode_prompt_latent(lingguang)`），失败率约 2/3，终于可以随意加探针。
+3. 编码器内部逐步加 sync：**每个 kernel 单独跑都正常**；`MING_IN_FLIGHT=1` 时好时坏。
+4. 扫单次提交的 dispatch 数（`MING_MAX_PENDING`）：1/8/32/48 → 全过；
+   63/64/65/96/128/256 → 几乎全挂。所以不是某个 kernel 算错，是**一次提交里 dispatch 太多**。
+5. 再扫"只把第一个提交切小"：进程里只在第 8/12/25 个 dispatch 强制 flush+wait 一次，之后
+   照旧 256 → **15/15 全过**；第 64 个才切 → 1/5。触发点是**冷启动的第一个命令缓冲**，
+   不是稳态批量大小（稳态 256 一直没事）。
+
+**根因**：P104（Pascal + 驱动 572.75）对进程的第一个命令缓冲有容量限制，超过约 50 个
+dispatch 就会把 GPU 弄挂。A4 恰好是唯一"第一次 GPU 工作就是 VAE 编码器"的路径；A1 的第一次
+是 LLM prefill、A3 在编码器之前还有一个 spk_head GEMV 带回读把队列先热了一遍，所以只有
+它中招。
+
+**修复**：`gpu.rs` 的 `FIRST_SUBMIT_MAX = 24` —— 进程的第一个提交只装 24 个 dispatch
+然后 `wait_idle`，之后恢复 256。交错 A/B（同窗口同机器，各 4 轮）：A1 解码
+`3.910 s → 3.900 s`（−0.26%，噪声内），即零成本。
+
+**验证**：
+
+- A4 在 P104 上 **8/8 通过**（修复前 0–2/8）。
+- 全套 **80/80 在 P104 上通过**（198 s）—— 这块卡此前跑全套会随机挂在
+  `Buffer with 'readback' label is invalid` / STATUS_ACCESS_VIOLATION，AGENTS 里建议"CI
+  钉核显"就是因为这个。同一份代码在核显上仍然 80/80。
+- 36 例门限：**36/36 全部跑完**（此前 34/36，A4 与 G2 直接掉卡），而且**凡是以前能跑的用例，
+  数值逐位不变**（`Compare-Object` 只差 A4/G2 两行从 FAIL 变成 ok）；G2_empress 现在
+  `dur 1.0000 / mel 0.99843 / spk 0.9975`，和 4.2 表里的 `0.99847 / 0.9973` 对得上。
+- A4 自己的 `dur 0.9412` 是对着**缓存 prompt 版**的参考音频比的（4.2 表注明了 A4/I1–I4 要用
+  `tools/ref_nocache.py` 重渲染），仍在已知缺口里，不是这次改动引入的。
 
 ## 1. 现状
 

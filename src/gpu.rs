@@ -52,6 +52,9 @@ pub struct Gpu {
     /// batching is a footgun and the smaller bound costs nothing measurable.
     /// `MING_MAX_PENDING` overrides.
     max_pending: usize,
+    /// The first submit of the process is capped (see [`FIRST_SUBMIT_MAX`]) and
+    /// drained; everything after it runs at `max_pending`.
+    primed: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 struct PendingDispatch {
@@ -67,6 +70,19 @@ pub const UNIFORM_SLOT: usize = 256;
 const ARENA_SLOTS: usize = 4096;
 
 const MAX_PENDING: usize = 256;
+
+/// Dispatches allowed in the very first submit of the process.
+///
+/// The P104 (Pascal, driver 572.75) faults the whole device when the first
+/// submit carries more than ~50 dispatches: nvlddmkm event 153, then
+/// `VK_ERROR_DEVICE_LOST` and any later readback fails with "buffer is
+/// invalid". Every *later* submit is fine at the full 256 -- the trigger is
+/// the cold first command buffer, not the size of steady-state batches (a
+/// one-off flush at dispatch 8/12/25 makes A4 pass 15/15, at 64 it fails
+/// 4/5, and splitting every batch to 32 also works). One extra submit+drain
+/// per process buys a reliable first dispatch wave, so the cap stays small
+/// and device independent (PROGRESS 0.18).
+const FIRST_SUBMIT_MAX: usize = 24;
 
 fn max_in_flight() -> u32 {
     std::env::var("MING_IN_FLIGHT")
@@ -278,6 +294,7 @@ impl Gpu {
             in_flight: std::rc::Rc::new(std::cell::Cell::new(0)),
             inflight_bytes: std::rc::Rc::new(std::cell::Cell::new(0)),
             max_pending,
+            primed: std::rc::Rc::new(std::cell::Cell::new(false)),
         })
     }
 
@@ -501,7 +518,13 @@ impl Gpu {
         }
         let n = self.pending_count.get() + 1;
         self.pending_count.set(n);
-        if n.is_multiple_of(self.max_pending) {
+        if !self.primed.get() {
+            if n >= FIRST_SUBMIT_MAX {
+                self.primed.set(true);
+                self.flush();
+                self.wait_idle();
+            }
+        } else if n.is_multiple_of(self.max_pending) {
             self.flush();
         }
     }

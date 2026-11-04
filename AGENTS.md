@@ -57,9 +57,10 @@ target\release\ming-tts-wgpu.exe synth ^
   守这条线：长 prefill（161 token）、长解码（640 帧 / 12.8 s）、长编码（600 帧 / 12 s）。
 - **不要追求逐采样点一致**：解码环是混沌的，1e-7 的输入扰动会被放大 1e5 倍
   （PROGRESS.md 4.4 已量化）。目标是每步 ~1e-6 数值一致 + 停止判据一致 + 听感一致。
-- 测试在 P104 上偶发设备掉线（`Buffer with 'readback' label is invalid` /
-  STATUS_ACCESS_VIOLATION，每次挂的测试不同、单跑 3/3 通过）；核显 `MING_DEVICE=igpu`
-  连跑稳定，CI 建议钉核显。
+- **P104 掉设备已经修了，别再当"偶发"忽略**：`Buffer with 'readback' label is invalid`
+  是进程的第一个命令缓冲超过 ~50 个 dispatch 时驱动复位（nvlddmkm event 153），
+  `gpu.rs` 的 `FIRST_SUBMIT_MAX` 已经把它压到 24 个一次 + 立即 drain。改批量/提交逻辑
+  时别把这个 prime 弄丢，否则 A4/G2/整套测试会在独显上随机挂（PROGRESS 0.18）。
 
 ## 现状（2026-11-03）
 
@@ -77,13 +78,14 @@ target\release\ming-tts-wgpu.exe synth ^
 
 ## 待查与性能决策
 
-代码层面没有已知的清理项。有两件事**待查**：
+代码层面没有已知的清理项。只剩一件**待查**：
 
 1. **F2_korean 时长差 1 步**：现跑参考是 1.0333，4.2 表里是 1.0000。d7dca7b 与更早的
    ffbf48d 都复现 1.0333，说明是 10-31 之后那批 kernel 改动之一带来的（参考环境一直跑不通，
    没人复验过）。换 t=6 的 warp kernel 能回到 1.0000，但那只是把差异挪到别处。
-2. **A4_clone_latent_only 在 P104 上稳定掉设备**（`Buffer with 'readback' label is
-   invalid`），核显正常。I1–I4 走同一条克隆路径却没事，差别只在 `use_spk_emb` 分支。
+
+（A4 在 P104 上掉设备已经查清并修好 —— 是进程第一个命令缓冲的容量问题，见 PROGRESS 0.18
+和上面那条规则。）
 
 性能决策（已复核，结论是不做）：t=6 的 32-lane warp-per-row kernel 在独显上端到端快
 9.5%（核显上慢 46%）。现跑参考 36 例里它让 30 例时长全 1.0000、还把 F2 的 1 步时长差修好，
