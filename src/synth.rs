@@ -300,11 +300,28 @@ fn prepare_text(req: &tasks::SynthRequest, a: &Args) -> Result<Vec<String>> {
         // The reference runs TalkerTN (pynini FSTs + regex glue) and then the
         // pynini-free normalisation kit. crate::tn is a port of that chain; its
         // FSTs are the reference's own compiled automata.
+        //
+        // ming_tts.prepare_text routes TN around inline paralinguistic tags: the
+        // FST chain rewrites "[Laughter]" into "，Laughter，", which the model
+        // then tries to pronounce. Keep the tags verbatim.
         fragments = fragments
             .iter()
             .map(|f| -> Result<String> {
-                let normalized = tn_normalize(f)?;
-                Ok(text::normalize_text_kit(&normalized))
+                let failure: std::cell::RefCell<Option<anyhow::Error>> =
+                    std::cell::RefCell::new(None);
+                let normalized = text::protect_paralinguistic_tags(f, |segment| {
+                    match tn_normalize(segment) {
+                        Ok(value) => text::normalize_text_kit(&value),
+                        Err(err) => {
+                            failure.borrow_mut().get_or_insert(err);
+                            segment.to_string()
+                        }
+                    }
+                });
+                match failure.into_inner() {
+                    Some(err) => Err(err),
+                    None => Ok(normalized),
+                }
             })
             .collect::<Result<Vec<_>>>()?
             .into_iter()
