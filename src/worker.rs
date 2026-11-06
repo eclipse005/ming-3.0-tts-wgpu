@@ -1,4 +1,5 @@
-//! Persistent JSON-lines worker for the HTTP adapter in `service/`.
+//! Persistent JSON-lines worker: load the checkpoint once, then serve one
+//! synthesis request per stdin line.
 //!
 //! `synth` loads a 2.9 GB checkpoint per utterance; a dubbing job has hundreds
 //! of utterances. This subcommand loads the tokenizer + backend once and then

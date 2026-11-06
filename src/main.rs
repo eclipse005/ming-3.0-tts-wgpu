@@ -29,7 +29,7 @@ enum Cmd {
         args: synth::Args,
     },
     /// Persistent JSON-lines worker: loads the model once, then serves one
-    /// synthesis request per stdin line. Used by service/ming_tts_service.py.
+    /// synthesis request per stdin line. One model load, many utterances.
     #[command(rename_all = "snake_case")]
     Worker {
         #[command(flatten)]
