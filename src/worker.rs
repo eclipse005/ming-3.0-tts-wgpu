@@ -8,9 +8,9 @@
 //! Protocol (all text is UTF-8, one JSON object per line):
 //!
 //! ```text
-//! stdin : {"id":"7","text":"你好","output":"D:/tmp/7.wav",
-//!          "prompt_wav_path":["D:/ref.wav"],"use_spk_emb":true, ...}
-//! stdout: @@MING@@{"id":"7","ok":true,"output":"D:/tmp/7.wav","elapsed_ms":1234}
+//! stdin : {"id":"7","text":"你好","output":"out/7.wav",
+//!          "prompt_wav_path":["ref.wav"],"use_spk_emb":true, ...}
+//! stdout: @@MING@@{"id":"7","ok":true,"output":"out/7.wav","elapsed_ms":1234}
 //! ```
 //!
 //! Every key of `synth::Args` is accepted (snake_case, same as the CLI flags).

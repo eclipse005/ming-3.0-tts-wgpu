@@ -2,7 +2,7 @@
 
 **Ming-3.0-tts speech synthesis in Rust with wgpu.**
 
-[![License](https://img.shields.io/github/license/eclipse005/ming-3.0-tts-wgpu?style=flat-square&color=16a34a)](LICENSE) [![Rust](https://img.shields.io/badge/Rust-2021-CE422B?style=flat-square&logo=rust&logoColor=white)](#install) [![wgpu](https://img.shields.io/badge/wgpu-30-0F7B6C?style=flat-square)](https://github.com/gfx-rs/wgpu)
+[![GitHub stars](https://img.shields.io/github/stars/eclipse005/ming-3.0-tts-wgpu?style=flat-square&logo=github&color=f59e0b)](https://github.com/eclipse005/ming-3.0-tts-wgpu/stargazers) [![GitHub forks](https://img.shields.io/github/forks/eclipse005/ming-3.0-tts-wgpu?style=flat-square&logo=github)](https://github.com/eclipse005/ming-3.0-tts-wgpu/network/members) [![License](https://img.shields.io/github/license/eclipse005/ming-3.0-tts-wgpu?style=flat-square&color=16a34a)](LICENSE) [![Rust](https://img.shields.io/badge/Rust-2021-CE422B?style=flat-square&logo=rust&logoColor=white)](#install) [![wgpu](https://img.shields.io/badge/wgpu-30-0F7B6C?style=flat-square)](https://github.com/gfx-rs/wgpu)
 
 [![Windows](https://img.shields.io/badge/Windows-x64-0078D6?style=flat-square)]( #install ) [![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?style=flat-square&logo=linux&logoColor=111111)](#install) [![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-111111?style=flat-square&logo=apple&logoColor=white)](#install)
 
@@ -18,10 +18,11 @@ PyTorch, no CUDA toolkit at runtime.
 ### Features
 
 * 🦀 Pure Rust — one binary, nothing else to install
-* 🎮 GPU acceleration through wgpu (Vulkan / Metal / DX12 / GL)
+* 🎮 GPU acceleration through wgpu (Vulkan / Metal / GL)
 * 🖥️ Windows / macOS / Linux
 * ⚡ Hand-written CPU backend: no NN framework, just rayon and a weight-reuse GEMM
 * 📦 Offline local inference
+* 🔁 Persistent worker: load the 2.9 GB checkpoint once, then feed one JSON request per line
 * 🗣️ Every task mode of the 0.5b model — `TTS`, `SEED`, `PLAIN`, `MULTILINGUAL`,
   `BASIC`, `EMOTION`, `DIALECT`, `IP`, `VOICE_DESIGN`, `STYLE`, `FREEFORM`
 * 🎙️ Voice cloning from a prompt recording, or from a precomputed `.pt` speaker embedding
@@ -39,7 +40,7 @@ cargo build --release        # target/release/ming-tts-wgpu
 ```
 
 Requires a recent stable Rust (edition 2021) and a GPU driver exposing Vulkan,
-Metal or DX12. Building does **not** need a CUDA toolkit, a Python environment or
+Metal or GL. Building does **not** need a CUDA toolkit, a Python environment or
 the model itself.
 
 | Dependency | When |
@@ -101,6 +102,57 @@ ming-tts-wgpu synth --model_path ./Ming-3.0-tts-0.5b --task TTS \
 The flag surface is the same as `infer.py` in the upstream repository, down to
 the snake_case spelling.
 
+### Worker
+
+`synth` pays the 2.9 GB load per utterance; `worker` pays it once and then serves
+a stream of requests, one JSON object per line — which is what a dubbing job or
+an editor wants:
+
+```bash
+ming-tts-wgpu worker --model_path ./Ming-3.0-tts-0.5b --device cuda:0 <<'EOF'
+{"id":"1","task":"TTS","text":"今天天气真不错。","output":"./one.wav"}
+{"id":"2","task":"TTS","text":"我们一起去公园散步吧。","output":"./two.wav"}
+{"cmd":"shutdown"}
+EOF
+```
+
+Every key of `synth::Args` is accepted in snake_case (same spelling as the CLI
+flags); `model_path` and `device` always come from the worker's own command
+line, so a request can never retarget the loaded engine. Responses are single
+lines prefixed with `@@MING@@`, interleaved with the inference log on stdout:
+
+```text
+@@MING@@{"event":"ready","pid":4711,"model_path":"./Ming-3.0-tts-0.5b","device":"cuda:0"}
+@@MING@@{"id":"1","ok":true,"output":"./one.wav","elapsed_ms":1320}
+```
+
+`{"cmd":"ping"}` answers `{"event":"pong"}`, `{"cmd":"shutdown"}` ends the loop.
+A rejected request answers `ok:false` with the error text and leaves the
+session alive, so a bad line costs one utterance, not the model load.
+
+### Library
+
+The binary is a thin shell over the crate; in-process consumers skip the
+subprocess, the socket and the serialized protocol entirely:
+
+```rust
+use ming_tts_wgpu::synth;
+
+let mut args = synth::Args::default();
+args.model_path = "./Ming-3.0-tts-0.5b".into();
+args.device = "cuda:0".into();
+let mut engine = synth::Engine::load(&args, true)?;   // once, keeps the VAE encoder resident
+
+args.task = "TTS".into();
+args.text = "今天天气真不错。".into();
+args.output = "./hello.wav".into();
+let plan = synth::plan(&args)?;                        // per utterance
+engine.synthesize(&args, &plan)?;
+```
+
+`Engine` holds `Rc` internally and is therefore **not `Send`**: keep it on the
+thread that created it and drive it through a channel.
+
 ### How close is it to the reference?
 
 Every stage is compared against goldens dumped from the Python implementation:
@@ -118,6 +170,19 @@ The 36-case `params_test` suite from upstream reproduces **matching durations on
 sample-level close, the rest drift in the late phase. Decoding is chaotic —
 a 1e-7 perturbation grows about 1e5× over 40 steps — so one Korean case ends one
 latent later than the reference. That is measured behaviour, not a bug.
+
+The same comparison was repeated on the 24 requests of the model's public demo
+page (voice design, director mode, paralinguistic tags, seven languages × two
+built-in voices, two dialects): **24/24 durations** agree within 10 ms, 17
+correlate above 0.995 and 13 differ by less than 0.02 peak. The other seven fork
+after about 1e-4 of latent drift accumulates, which is the chaos above — the
+reference disagrees with *itself* across devices far more: same seed, same text,
+CPU versus CUDA gives different lengths and a waveform correlation of 0.07.
+
+One real bug surfaced during that run and is fixed: text normalisation rewrote
+inline tags (`[Laughter]` came out as `，Laughter，`), so the model pronounced the
+tag instead of laughing. `prepare_text` now routes the FST chain around tags, and
+the tag cards match the reference sample for sample.
 
 Speech rate on a Tesla P104 (3.2 s of audio, decode only): **RTF ≈ 0.60**,
 against 0.78 for the Python/CUDA-graph build on the same text. The card's power
@@ -157,7 +222,9 @@ the reference available.
 
 ```
 src/
-  main.rs, synth.rs          CLI: flags -> task -> text fragments -> backend
+  main.rs, worker.rs         binary: `synth` (one utterance) and `worker` (JSON lines)
+  lib.rs                     library surface: synth::Engine, tasks, worker
+  synth.rs                   flags -> task -> text fragments -> backend
   backend.rs                 the fragment loop shared by every backend
   pipeline.rs                wgpu backend: decode loop, sampler noise
   cpu/                       hand-written CPU backend (LLM, DiT, VAE, GEMM)
@@ -179,11 +246,16 @@ discrete and integrated GPUs, the port picks the tuning per adapter class — an
 on `--device cpu` it falls back to a hand-written host implementation of the same
 pipeline, not to a different model.
 
+DX12 is compiled out on purpose: wgpu 30's default `dx12` backend pulls
+`windows = 0.62`, which does not build next to `gpu-allocator` in a host that
+pins `windows 0.61`. Add the feature back if your host needs it; inference is
+identical.
+
 ### Project status
 
 The port is functionally complete against `infer.py`: same flags, all task modes,
-fragmentation, cloning, zero-speaker, STYLE re-conditioning and text
-normalisation. Streaming is not implemented because `infer.py` does not expose
+fragmentation, cloning, zero-speaker, STYLE re-conditioning, text
+normalisation and the persistent worker. Streaming is not implemented because `infer.py` does not expose
 it either.
 
 ### Related
