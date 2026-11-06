@@ -185,19 +185,9 @@ cargo test --release         # 三个冒烟测试，不需要任何模型/数据
 * `synthesize_short_utterance` —— 一次端到端合成。能找到 checkpoint 时才跑：用 `MING_MODEL`
   指向模型目录（默认找 `../Ming-3.0-tts-0.5b`），找不到就打印 `[skip]`
 
-上面那张表里的数值，是对着 Python 参考导出的金标逐阶段比出来的。那些金标不属于源码，
-没有随仓库提交；`tools/` 里保留了在"有参考环境"的机器上重跑整套对拍用的脚本。
-
-### 验证脚本
-
-| 脚本 | 用途 | 需要 |
-|---|---|---|
-| `tools/check_params_align.py` | 跑 36 个上游用例，打印时长比 / rel_l2 / log-mel / 音色余弦 | 参考渲染好的 WAV（`output/params_test/`） |
-| `tools/_goldens_align.py` | 用金标里记录的抽样序列做同样的比较，不需要 Python | 一个 `goldens/` 目录 |
-| `tools/stress_compare.py` | 10 例压力集：长文、多分片、极短文本、混排、`--raw_text` | 一份 Python 参考 checkout |
-| `tools/dump_params_goldens.py` | 记录参考在 36 例上的 `torch.randn` 抽样和音频 | 一份 Python 参考 checkout |
-| `tools/ref_nocache.py` | 重渲染那几个"复用了缓存 prompt"的用例的参考音频 | 一份 Python 参考 checkout |
-| `tools/compare_wav.py` | 两个 WAV 的时长 / 电平 / 相关性对比 | — |
+上面那张表里的数值，是对着 Python 参考导出的金标逐阶段比出来的，那套脚本服务于移植过程
+而不是运行时，已经随着调参一起下线：干净 clone 里带的是上面的冒烟测试、随仓库提交的
+`tn_data/`，以及这些实测数字。
 
 ### 代码结构
 

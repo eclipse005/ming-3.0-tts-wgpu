@@ -203,20 +203,9 @@ cargo test --release         # three smoke tests, no assets needed
   default is `../Ming-3.0-tts-0.5b`), otherwise it prints `[skip]`.
 
 The numerical comparison behind the table above was done against goldens dumped
-from the Python reference. That data is not part of a source checkout, so it is
-not shipped; `tools/` keeps the harness for re-running it against a machine with
-the reference available.
-
-### Verification tooling
-
-| Script | Purpose | Needs |
-|---|---|---|
-| `tools/check_params_align.py` | Runs the 36 upstream cases and prints duration ratio / rel_l2 / log-mel / speaker cosine | the reference's rendered WAVs (`output/params_test/`) |
-| `tools/_goldens_align.py` | Same comparison from recorded noise draws, no Python needed | a `goldens/` directory |
-| `tools/stress_compare.py` | 10-case stress set: long text, multi-fragment, tiny inputs, mixed script, `--raw_text` | a Python reference checkout |
-| `tools/dump_params_goldens.py` | Records the reference's `torch.randn` draws and audio for the 36 cases | a Python reference checkout |
-| `tools/ref_nocache.py` | Re-renders the cases whose reference audio reused a cached prompt | a Python reference checkout |
-| `tools/compare_wav.py` | Duration / level / correlation between two WAVs | — |
+from the Python reference, and that harness drove the port rather than the
+runtime. It is gone with the tuning work: what a clean checkout carries is the
+smoke suite above, the shipped `tn_data/`, and the measured numbers.
 
 ### Layout
 
