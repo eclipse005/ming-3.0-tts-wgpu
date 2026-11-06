@@ -3,8 +3,24 @@ name = "ming-tts-wgpu"
 version = "0.1.0"
 edition = "2021"
 
+# Library first: in-process consumers depend on this crate; the binary is a
+# thin CLI over it. Keep both explicit so the exe name stays stable.
+[lib]
+name = "ming_tts_wgpu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ming-tts-wgpu"
+path = "src/main.rs"
+
 [dependencies]
-wgpu = "30"
+# Vulkan/GL/Metal only. wgpu 30's default `dx12` backend forces
+# `windows = 0.62` while `gpu-allocator 0.28` accepts 0.53..=0.62; inside
+# VoxTrans (Tauri pins windows 0.61.3) Cargo then picks two different
+# `ID3D12Device` types and wgpu-hal fails to compile. This machine runs the
+# engine on Vulkan, so dropping the unused DX12 backend fixes the graph
+# without changing inference. Keep every other default feature.
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "gles", "vulkan", "wgsl", "webgpu"] }
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 memmap2 = "0.9"

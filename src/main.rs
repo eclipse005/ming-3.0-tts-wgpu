@@ -5,32 +5,8 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-
-mod audio;
-mod backend;
-mod cpu;
-mod dit;
-mod golden;
-mod gpu;
-mod istft;
-mod nn;
-mod ops;
-mod pt;
-mod pipeline;
-mod qwen_lm;
-mod rng;
-mod shaders;
-#[cfg(test)]
-mod smoke;
-mod synth;
-mod spk;
-mod tasks;
-mod text;
-mod tn;
-mod tok;
-mod vae;
-mod vae_dec;
-mod weights;
+// The CLI is a consumer of the library, not a second copy of the modules.
+use ming_tts_wgpu::{gpu, synth, worker};
 
 #[derive(Parser)]
 #[command(name = "ming-tts", version, about = "Ming-3.0-tts-0.5b on wgpu")]
@@ -52,6 +28,13 @@ enum Cmd {
         #[command(flatten)]
         args: synth::Args,
     },
+    /// Persistent JSON-lines worker: loads the model once, then serves one
+    /// synthesis request per stdin line. Used by service/ming_tts_service.py.
+    #[command(rename_all = "snake_case")]
+    Worker {
+        #[command(flatten)]
+        args: worker::Args,
+    },
 }
 
 fn main() -> Result<()> {
@@ -63,5 +46,6 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Synth { args } => synth::run(args),
+        Cmd::Worker { args } => worker::run(args),
     }
 }

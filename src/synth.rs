@@ -11,9 +11,14 @@ use crate::tasks;
 use crate::text;
 use crate::tok::Tok;
 use anyhow::{bail, Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-#[derive(clap::Args)]
+/// `serde::Deserialize` is for the persistent worker: the HTTP adapter sends
+/// one JSON object per request with the same snake_case field names as the CLI.
+/// `#[serde(default)]` + `Default` keep both surfaces in sync with clap's
+/// defaults, and unknown keys are ignored so a client can send extra metadata.
+#[derive(clap::Args, serde::Deserialize)]
+#[serde(default)]
 #[command(rename_all = "snake_case")]
 pub struct Args {
     #[arg(long)]
@@ -78,18 +83,25 @@ pub struct Args {
     pub no_trim_silence: bool,
 }
 
-pub fn run(a: Args) -> Result<()> {
-    let model_dir = Path::new(&a.model_path);
-    let tok = Tok::load(model_dir).context("load tokenizer")?;
+/// Everything a single utterance needs before the device is touched.
+pub struct Plan {
+    req: tasks::SynthRequest,
+    fragments: Vec<String>,
+    reference_first_fragment: bool,
+    /// A request built from a prompt wav + transcript (or a multi-fragment
+    /// STYLE task) needs the VAE encoder to be resident on the device.
+    pub needs_encoder: bool,
+}
 
+pub fn plan(a: &Args) -> Result<Plan> {
     let req = tasks::build_task_generation_kwargs(
         &a.task,
         &a.text,
         a.language_id.as_deref(),
         a.instruction.as_deref(),
-        controls(&a).as_ref(),
+        controls(a).as_ref(),
         a.instruction_schema.as_deref(),
-        single_prompt_wav(&a),
+        single_prompt_wav(a),
         a.prompt_text.as_deref(),
         a.spk_emb_path.first().map(String::as_str),
         a.use_spk_emb,
@@ -100,25 +112,57 @@ pub fn run(a: Args) -> Result<()> {
     )?;
 
     // Same split/normalise decision as ming_tts.prepare_text.
-    let fragments = prepare_text(&req, &a)?;
+    let fragments = prepare_text(&req, a)?;
     // Voice-design (STYLE) tasks that get split re-use the first generated chunk
     // as the acoustic prompt for the remaining fragments
     // (ming_tts.synthesize's reference_first_fragment branch). That needs the
     // VAE encoder even when no --prompt_wav_path was given.
     let reference_first_fragment = req.taskname == "STYLE" && fragments.len() > 1;
     let need_prompt = !a.prompt_wav_path.is_empty() && req.prompt_text.is_some();
-
-    let mut rng = noise_source(&a)?;
-    let mut be = load_backend(&a, model_dir, need_prompt || reference_first_fragment)?;
-    let job = backend::Job {
-        model_dir,
-        tok: &tok,
-        req: &req,
-        args: &a,
-        fragments: &fragments,
+    Ok(Plan {
+        req,
+        fragments,
         reference_first_fragment,
-    };
-    backend::synthesize(&job, be.as_mut(), rng.as_mut())
+        needs_encoder: need_prompt || reference_first_fragment,
+    })
+}
+
+/// A loaded model, reusable across utterances. The CLI loads one, runs one
+/// utterance and exits; `worker` loads one and keeps it for the whole session.
+pub struct Engine {
+    model_dir: PathBuf,
+    tok: Tok,
+    be: Box<dyn Backend>,
+}
+
+impl Engine {
+    /// `with_encoder` decides once whether the VAE encoder is resident. A
+    /// worker passes `true` so a later request with a prompt transcript works.
+    pub fn load(a: &Args, with_encoder: bool) -> Result<Self> {
+        let model_dir = PathBuf::from(&a.model_path);
+        let tok = Tok::load(&model_dir).context("load tokenizer")?;
+        let be = load_backend(a, &model_dir, with_encoder)?;
+        Ok(Self { model_dir, tok, be })
+    }
+
+    pub fn synthesize(&mut self, a: &Args, p: &Plan) -> Result<()> {
+        let mut rng = noise_source(a)?;
+        let job = backend::Job {
+            model_dir: &self.model_dir,
+            tok: &self.tok,
+            req: &p.req,
+            args: a,
+            fragments: &p.fragments,
+            reference_first_fragment: p.reference_first_fragment,
+        };
+        backend::synthesize(&job, self.be.as_mut(), rng.as_mut())
+    }
+}
+
+pub fn run(a: Args) -> Result<()> {
+    let p = plan(&a)?;
+    let mut engine = Engine::load(&a, p.needs_encoder)?;
+    engine.synthesize(&a, &p)
 }
 
 /// The style knobs, boxed up only when at least one of them is set.
@@ -198,6 +242,44 @@ fn load_backend(a: &Args, model_dir: &Path, needs_encoder: bool) -> Result<Box<d
 }
 
 /// Same split/normalise decision as ming_tts.prepare_text.
+impl Default for Args {
+    /// Mirrors the clap defaults above. The worker deserialises JSON into this
+    /// struct, so the two must agree.
+    fn default() -> Self {
+        Self {
+            model_path: String::new(),
+            task: "TTS".to_string(),
+            text: String::new(),
+            output: String::new(),
+            device: "cuda:0".to_string(),
+            seed: 1895,
+            language_id: None,
+            instruction: None,
+            instruction_schema: None,
+            speed: None,
+            pitch: None,
+            volume: None,
+            emotion: None,
+            dialect: None,
+            style: None,
+            ip: None,
+            cfg: 2.0,
+            sigma: 0.25,
+            temperature: 0.0,
+            max_length: 24,
+            max_decode_steps: 1000,
+            prompt_wav_path: Vec::new(),
+            prompt_text: None,
+            spk_emb_path: Vec::new(),
+            use_spk_emb: false,
+            use_zero_spk_emb: false,
+            no_text_normalization: false,
+            raw_text: false,
+            no_trim_silence: false,
+        }
+    }
+}
+
 fn prepare_text(req: &tasks::SynthRequest, a: &Args) -> Result<Vec<String>> {
     if a.raw_text {
         return Ok(vec![req.text.clone()]);
