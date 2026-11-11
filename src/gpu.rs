@@ -80,7 +80,16 @@ const MAX_PENDING: usize = 256;
 /// 4/5, and splitting every batch to 32 also works). One extra submit+drain
 /// per process buys a reliable first dispatch wave, so the cap stays small
 /// and device independent (PROGRESS 0.18).
-const FIRST_SUBMIT_MAX: usize = 24;
+///
+/// 24 was not small enough once the VAE encoder is resident (`worker` loads it
+/// eagerly): the extra ~840 MiB moves the cold-buffer threshold from ~50 down
+/// to ~16 dispatches. Measured on the same card with the encoder loaded, first
+/// submit at 4/8/12 dispatches: 12/12 runs clean; at 16/20/24: 8/8 lose the
+/// device (`worker` therefore panicked on its first request while `synth`,
+/// which skips the encoder unless a prompt transcript is given, ran fine).
+/// 8 keeps a factor-of-two margin below the measured 16 and still costs one
+/// submit+drain per process.
+const FIRST_SUBMIT_MAX: usize = 8;
 
 fn max_in_flight() -> u32 {
     std::env::var("MING_IN_FLIGHT")
